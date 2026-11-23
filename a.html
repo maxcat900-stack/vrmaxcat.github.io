@@ -1,0 +1,772 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Белая VR-комната</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #eef1f5;
+    font-family: system-ui, "Segoe UI", Roboto, sans-serif; color: #1b1f24; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #hud { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+    max-width: min(94vw, 700px); padding: 12px 14px; border-radius: 14px;
+    background: rgba(255,255,255,.84); border: 1px solid rgba(0,0,0,.08);
+    box-shadow: 0 8px 30px rgba(20,30,50,.14); backdrop-filter: blur(8px); }
+  body.inxr #hud { display: none; }
+  #hud h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  #status { margin: 0 0 9px; font-size: 13px; line-height: 1.45; color: #333b45; }
+  .keys { margin: 8px 0 0; font-size: 12px; color: #55606d; line-height: 1.4; }
+  button { font: inherit; font-size: 14px; padding: 9px 16px; border-radius: 10px;
+    border: 1px solid #1f6feb; background: #1f6feb; color: #fff; cursor: pointer; }
+  button[disabled] { background: #ccd3db; border-color: #ccd3db; color: #6b7480; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>Белая VR-комната · 6 × 8 × 3 м</h1>
+  <p id="status">Загрузка…</p>
+  <button id="vr" disabled>Войти в VR</button>
+  <p class="keys">Мышь — осмотр &nbsp;·&nbsp; W A S D / стрелки — идти &nbsp;·&nbsp; Shift — быстрее<br>
+  В шлеме: наведись контроллером на пол (куржок) и отпусти trigger — телепорт.</p>
+</div>
+<script>
+'use strict';
+
+const canvas = document.getElementById('c');
+const statusEl = document.getElementById('status');
+const vrBtn = document.getElementById('vr');
+let fatal = null;
+const note = m => { if (!fatal) statusEl.textContent = m; };
+const fail = m => { fatal = m; statusEl.textContent = m; console.error(m); };
+
+window.addEventListener('error', e => fail('Ошибка JS: ' + e.message + ' (строка ' + e.lineno + ')'));
+
+const gl = canvas.getContext('webgl2', {
+  antialias: true, alpha: false, depth: true, stencil: false,
+  xrCompatible: true, powerPreference: 'high-performance'
+});
+if (!gl) fail('WebGL2 недоступен — открой в свежем Chrome/Edge/Firefox.');
+
+/* ---------------- math ---------------- */
+
+const norm = v => {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+};
+const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const clamp = (x, a, b) => x < a ? a : (x > b ? b : x);
+const IDENT = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  return new Float32Array([
+    f/aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far+near)*nf, -1,
+    0, 0, 2*far*near*nf, 0
+  ]);
+}
+
+// View = Rx(-pitch) * Ry(-yaw) * T(-pos), column-major.
+function lookView(pos, yaw, pitch) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  // world-space camera basis: right, up, back (camera looks along -back)
+  const r = [cy, 0, sy];
+  const b = [-sy*cp, -sp, cy*cp];
+  const u = [-sp*sy, cp, sp*cy];
+  return new Float32Array([
+    r[0], u[0], b[0], 0,
+    r[1], u[1], b[1], 0,
+    r[2], u[2], b[2], 0,
+    -(r[0]*pos[0]+r[1]*pos[1]+r[2]*pos[2]),
+    -(u[0]*pos[0]+u[1]*pos[1]+u[2]*pos[2]),
+    -(b[0]*pos[0]+b[1]*pos[1]+b[2]*pos[2]),
+    1
+  ]);
+}
+
+function camFromView(v) {
+  const tx = v[12], ty = v[13], tz = v[14];
+  return [
+    -(v[0]*tx + v[4]*ty + v[8]*tz),
+    -(v[1]*tx + v[5]*ty + v[9]*tz),
+    -(v[2]*tx + v[6]*ty + v[10]*tz)
+  ];
+}
+const fwdFromView = v => norm([-v[2], -v[6], -v[10]]);
+
+// Post-multiply a view matrix by T(-offset): moves the player by +offset in world.
+function offsetView(src, off) {
+  const m = new Float32Array(16);
+  m.set(src);
+  m[12] = src[0]*-off[0] + src[4]*-off[1] + src[8]*-off[2] + src[12];
+  m[13] = src[1]*-off[0] + src[5]*-off[1] + src[9]*-off[2] + src[13];
+  m[14] = src[2]*-off[0] + src[6]*-off[1] + src[10]*-off[2] + src[14];
+  return m;
+}
+
+/* ---------------- room geometry ---------------- */
+
+const RM = { x0: -3, x1: 3, z0: -4, z1: 4, y0: 0, y1: 3, thk: 0.18 };
+const MAT = { WALL: 0, FLOOR: 1, GLASS: 2, OUT: 3, SKY: 4 };
+
+function quad(arr, a, b, c, d, mat) {
+  const n = norm(cross([b[0]-a[0], b[1]-a[1], b[2]-a[2]], [c[0]-a[0], c[1]-a[1], c[2]-a[2]]));
+  const push = p => { arr.push(p[0], p[1], p[2], n[0], n[1], n[2], mat); };
+  push(a); push(b); push(c); push(a); push(c); push(d);
+}
+
+function rect(arr, O, A, B, u0, u1, v0, v1, mat) {
+  if (u1 - u0 < 1e-4 || v1 - v0 < 1e-4) return;
+  const P = (u, v) => [O[0]+A[0]*u+B[0]*v, O[1]+A[1]*u+B[1]*v, O[2]+A[2]*u+B[2]*v];
+  quad(arr, P(u0,v0), P(u1,v0), P(u1,v1), P(u0,v1), mat);
+}
+
+// Wall panel in plane (O,A,B) with one rectangular hole given in (u,v).
+function wall(arr, O, A, B, nin, u0, u1, v0, v1, hole) {
+  if (!hole) { rect(arr, O, A, B, u0, u1, v0, v1, MAT.WALL); return; }
+  const [hu0, hu1, hv0, hv1] = hole;
+  rect(arr, O, A, B, u0, u1, v0, hv0, MAT.WALL);
+  rect(arr, O, A, B, u0, u1, hv1, v1, MAT.WALL);
+  rect(arr, O, A, B, u0, hu0, Math.max(hv0, v0), Math.min(hv1, v1), MAT.WALL);
+  rect(arr, O, A, B, hu1, u1, Math.max(hv0, v0), Math.min(hv1, v1), MAT.WALL);
+  // reveal (wall thickness)
+  const T = RM.thk;
+  const P = (u, v, s) => [O[0]+A[0]*u+B[0]*v-nin[0]*T*s, O[1]+A[1]*u+B[1]*v-nin[1]*T*s, O[2]+A[2]*u+B[2]*v-nin[2]*T*s];
+  quad(arr, P(hu0,hv0,0), P(hu0,hv1,0), P(hu0,hv1,1), P(hu0,hv0,1), MAT.WALL);
+  quad(arr, P(hu1,hv0,1), P(hu1,hv1,1), P(hu1,hv1,0), P(hu1,hv0,0), MAT.WALL);
+  quad(arr, P(hu0,hv1,0), P(hu1,hv1,0), P(hu1,hv1,1), P(hu0,hv1,1), MAT.WALL);
+  quad(arr, P(hu0,hv0,1), P(hu1,hv0,1), P(hu1,hv0,0), P(hu0,hv0,0), MAT.WALL);
+}
+
+function glass(arr, O, A, B, nin, hole) {
+  const [hu0, hu1, hv0, hv1] = hole;
+  const P = (u, v) => [O[0]+A[0]*u+B[0]*v-nin[0]*RM.thk*0.5, O[1]+A[1]*u+B[1]*v-nin[1]*RM.thk*0.5, O[2]+A[2]*u+B[2]*v-nin[2]*RM.thk*0.5];
+  quad(arr, P(hu0,hv0), P(hu1,hv0), P(hu1,hv1), P(hu0,hv1), MAT.GLASS);
+}
+
+function sphere(arr, rad, seg, rings, mat) {
+  const P = (t, p) => [rad*Math.sin(t)*Math.cos(p), rad*Math.cos(t), rad*Math.sin(t)*Math.sin(p)];
+  for (let i = 0; i < rings; i++) {
+    const t0 = Math.PI*i/rings, t1 = Math.PI*(i+1)/rings;
+    for (let j = 0; j < seg; j++) {
+      const p0 = 2*Math.PI*j/seg, p1 = 2*Math.PI*(j+1)/seg;
+      quad(arr, P(t0,p0), P(t1,p0), P(t1,p1), P(t0,p1), mat);
+    }
+  }
+}
+
+function box(arr, c, h, rotX) {
+  const cs = Math.cos(rotX), sn = Math.sin(rotX);
+  const tf = p => [c[0]+p[0], c[1]+p[1]*cs-p[2]*sn, c[2]+p[1]*sn+p[2]*cs];
+  const q = (a, b, cc, d) => quad(arr, tf(a), tf(b), tf(cc), tf(d), MAT.WALL);
+  const [x, y, z] = h;
+  q([-x,-y,-z],[x,-y,-z],[x,y,-z],[-x,y,-z]);
+  q([x,-y,z],[-x,-y,z],[-x,y,z],[x,y,z]);
+  q([-x,y,-z],[x,y,-z],[x,y,z],[-x,y,z]);
+  q([-x,-y,z],[x,-y,z],[x,-y,-z],[-x,-y,-z]);
+  q([x,-y,-z],[x,-y,z],[x,y,z],[x,y,-z]);
+  q([-x,-y,z],[-x,-y,-z],[-x,y,-z],[-x,y,z]);
+}
+
+function torus(arr, cen, R, r, seg, sides) {
+  const P = (a, b) => {
+    const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b);
+    return [cen[0]+(R+r*cb)*ca, cen[1]+(R+r*cb)*sa, cen[2]+r*sb];
+  };
+  for (let i = 0; i < seg; i++) for (let j = 0; j < sides; j++) {
+    const a0 = 2*Math.PI*i/seg, a1 = 2*Math.PI*(i+1)/seg;
+    const b0 = 2*Math.PI*j/sides, b1 = 2*Math.PI*(j+1)/sides;
+    quad(arr, P(a0,b0), P(a1,b0), P(a1,b1), P(a0,b1), MAT.WALL);
+  }
+}
+
+const roomData = [];
+{
+  const W = RM.x1 - RM.x0, D = RM.z1 - RM.z0, H = RM.y1 - RM.y0;
+
+  // floor + ceiling
+  rect(roomData, [RM.x0, RM.y0, RM.z0], [1,0,0], [0,0,1], 0, W, 0, D, MAT.FLOOR);
+  rect(roomData, [RM.x0, RM.y1, RM.z0], [1,0,0], [0,0,1], 0, W, 0, D, MAT.WALL);
+
+  // back wall (z = z1)
+  wall(roomData, [RM.x0, RM.y0, RM.z1], [1,0,0], [0,1,0], [0,0,-1], 0, W, 0, H, null);
+  // front wall (z = z0) with doorway
+  wall(roomData, [RM.x0, RM.y0, RM.z0], [1,0,0], [0,1,0], [0,0,1], 0, W, 0, H,
+       [1.88, 3.12, 0, 2.10]);
+  // left wall (x = x0) with window
+  wall(roomData, [RM.x0, RM.y0, RM.z1], [0,0,-1], [0,1,0], [1,0,0], 0, D, 0, H,
+       [4.60, 6.40, 0.95, 2.45]);
+  glass(roomData, [RM.x0, RM.y0, RM.z1], [0,0,-1], [0,1,0], [1,0,0], [4.60, 6.40, 0.95, 2.45]);
+  // right wall (x = x1) with window
+  wall(roomData, [RM.x1, RM.y0, RM.z0], [0,0,1], [0,1,0], [-1,0,0], 0, D, 0, H,
+       [4.40, 6.20, 0.95, 2.45]);
+  glass(roomData, [RM.x1, RM.y0, RM.z0], [0,0,1], [0,1,0], [-1,0,0], [4.40, 6.20, 0.95, 2.45]);
+
+  // ceiling light panels (just under the ceiling plane)
+  const lp = RM.y1 - 0.012;
+  rect(roomData, [RM.x0, lp, RM.z0], [1,0,0], [0,0,1], 2.45, 3.55, 0.70, 3.30, MAT.GLASS);
+  rect(roomData, [RM.x0, lp, RM.z0], [1,0,0], [0,0,1], 2.45, 3.55, 4.70, 7.30, MAT.GLASS);
+
+  // outdoor ground seen through the doorway
+  rect(roomData, [-70, -0.08, -70], [1,0,0], [0,0,1], 0, 140, 0, 140, MAT.OUT);
+}
+
+const skyData = [];
+sphere(skyData, 90, 40, 20, MAT.SKY);
+
+const ctrlData = [];
+box(ctrlData, [0, 0.006, -0.016], [0.021, 0.014, 0.046], 0);
+box(ctrlData, [0, -0.052, 0.028], [0.0135, 0.046, 0.0135], 0.32);
+torus(ctrlData, [0, 0, -0.058], 0.042, 0.0065, 22, 6);
+
+/* ---------------- shaders ---------------- */
+
+const VS_ROOM = `#version 300 es
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in float aMat;
+uniform mat4 uProj, uView, uModel;
+out vec3 vW;
+out vec3 vN;
+out float vMat;
+void main() {
+  vec4 wp = uModel * vec4(aPos, 1.0);
+  vW = wp.xyz;
+  vN = mat3(uModel) * aNrm;
+  vMat = aMat;
+  gl_Position = uProj * uView * wp;
+}`;
+
+const FS_ROOM = `#version 300 es
+precision highp float;
+in vec3 vW;
+in vec3 vN;
+in float vMat;
+uniform vec3 uCam, uFwd, uSun, uDynAlbedo;
+uniform float uVig, uDyn, uAOScale;
+uniform vec3 uRoomMin, uRoomMax;
+uniform vec4 uPool[4];
+out vec4 fragColor;
+
+vec3 skyAt(vec3 d) {
+  float t = clamp(d.y*0.5+0.5, 0.0, 1.0);
+  vec3 c = mix(vec3(0.86,0.90,0.95), vec3(0.45,0.63,0.90), smoothstep(0.48,0.88,t));
+  return c + vec3(0.34,0.30,0.24)*pow(max(dot(d,uSun),0.0), 24.0);
+}
+float poolF(vec4 P, vec2 p) {
+  vec2 d = p - P.xy;
+  return P.w*exp(-dot(d,d)/(P.z*P.z));
+}
+void main() {
+  vec3 n = normalize(vN);
+  vec3 vd = vW - uCam;
+  float dist = max(length(vd), 1e-4);
+  vec3 v = vd/dist;
+  if (dot(n, v) > 0.0) n = -n;
+
+  if (vMat > 3.5) { fragColor = vec4(skyAt(v), 1.0); return; }
+  if (vMat > 2.5) { fragColor = vec4(mix(skyAt(v), vec3(0.60,0.64,0.68), exp(-dist*0.035)), 1.0); return; }
+  if (vMat > 1.5) { fragColor = vec4(1.0,0.995,0.98,1.0); return; }
+
+  // Distance to the *other* room planes only: a point lying on its own surface
+  // is at distance 0 from it, which would otherwise darken every wall and the floor.
+  float dw = 1e9;
+  if (abs(n.x) < 0.5) dw = min(dw, min(vW.x-uRoomMin.x, uRoomMax.x-vW.x));
+  if (abs(n.z) < 0.5) dw = min(dw, min(vW.z-uRoomMin.z, uRoomMax.z-vW.z));
+  float df = n.y > 0.5 ? 1e9 : vW.y - uRoomMin.y;
+  float dc = n.y < -0.5 ? 1e9 : uRoomMax.y - vW.y;
+  float ao = 1.0;
+  ao *= 1.0 - 0.26*exp(-dw/0.40);
+  ao *= 1.0 - 0.30*exp(-df/0.50);
+  ao *= 1.0 - 0.20*exp(-dc/0.60);
+  ao *= 1.0 - 0.16*exp(-min(dw, min(df,dc))/0.11);
+  ao = mix(1.0, clamp(ao, 0.0, 1.0), uAOScale);
+
+  vec3 albedo = mix(mix(vec3(0.765,0.770,0.790), vec3(0.92,0.925,0.935), step(vMat, 0.5)), uDynAlbedo, uDyn);
+  float ndl = dot(n, uSun);
+  float diff = clamp((ndl+0.55)/1.55, 0.0, 1.0);
+  vec3 hemi = mix(vec3(0.80,0.81,0.83), vec3(0.99,1.0,1.03), 0.5+0.5*n.y);
+  vec3 fill = vec3(0.26,0.265,0.275);
+  float pools = poolF(uPool[0],vW.xz) + poolF(uPool[1],vW.xz) + poolF(uPool[2],vW.xz) + poolF(uPool[3],vW.xz);
+
+  vec3 col = albedo * ( hemi*0.70*ao + fill*(0.35+0.65*ao)
+              + vec3(1.0,0.985,0.96) * (diff*0.13*ao + pools*(0.45+0.40*max(ndl,0.0))) );
+
+  if (vMat > 0.5 && vMat < 1.5) {
+    vec2 c = vW.xz/0.5;
+    vec2 f = abs(fract(c)-0.5);
+    vec2 dd = fwidth(c);
+    vec2 aa = smoothstep(vec2(0.0), dd*1.6, f);
+    col *= 1.0 - 0.16*(1.0 - aa.x*aa.y);
+  }
+  col *= mix(1.0, smoothstep(0.20, 0.92, dot(v, uFwd)), uVig);
+  fragColor = vec4(min(col, vec3(1.0)), 1.0);
+}`;
+
+const VS_MARKER = `#version 300 es
+layout(location=0) in vec2 aCorner;
+uniform mat4 uProj, uView;
+uniform vec3 uCenter;
+uniform float uSize;
+out vec2 vC;
+void main() {
+  vC = aCorner;
+  vec3 p = vec3(uCenter.x + aCorner.x*uSize, 0.012, uCenter.z + aCorner.y*uSize);
+  gl_Position = uProj * uView * vec4(p, 1.0);
+}`;
+
+const FS_MARKER = `#version 300 es
+precision highp float;
+in vec2 vC;
+uniform float uSize;
+out vec4 fragColor;
+void main() {
+  float r = length(vC)*uSize;
+  float ring = smoothstep(0.30,0.27,r) * smoothstep(0.19,0.22,r);
+  float dotc = smoothstep(0.055,0.030,r);
+  float glow = exp(-r*r*9.0)*0.35;
+  float a = clamp(ring*0.85 + dotc*0.80 + glow, 0.0, 1.0);
+  vec3 c = mix(vec3(0.22,0.42,0.92), vec3(0.85,0.93,1.0), glow);
+  fragColor = vec4(c, a*0.92);
+}`;
+
+const VS_BEAM = `#version 300 es
+layout(location=0) in vec2 aTS;
+uniform mat4 uProj, uView;
+uniform vec3 uO, uD, uCam;
+uniform float uLen;
+out float vT;
+void main() {
+  float t = aTS.x*uLen;
+  vec3 p = uO + uD*t;
+  vec3 side = normalize(cross(uD, normalize(uCam - p)));
+  p += side*aTS.y*0.008;
+  vT = aTS.x;
+  gl_Position = uProj * uView * vec4(p, 1.0);
+}`;
+
+const FS_BEAM = `#version 300 es
+precision highp float;
+in float vT;
+uniform vec4 uCol;
+out vec4 fragColor;
+void main() { fragColor = vec4(uCol.rgb, uCol.a*(1.0 - 0.45*vT)); }`;
+
+const VS_FULL = `#version 300 es
+layout(location=0) in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FS_FULL = `#version 300 es
+precision highp float;
+uniform vec4 uCol;
+out vec4 fragColor;
+void main() { fragColor = uCol; }`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) fail('Шейдер: ' + gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vsrc, fsrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsrc));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) fail('Линковка: ' + gl.getProgramInfoLog(p));
+  const u = {};
+  const count = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < count; i++) {
+    const info = gl.getActiveUniform(p, i);
+    u[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(p, info.name);
+  }
+  return { p, u };
+}
+
+const room = program(VS_ROOM, FS_ROOM);
+const marker = program(VS_MARKER, FS_MARKER);
+const beam = program(VS_BEAM, FS_BEAM);
+const full = program(VS_FULL, FS_FULL);
+
+/* ---------------- buffers ---------------- */
+
+function meshVao(data) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 24);
+  gl.bindVertexArray(null);
+  return { vao, count: data.length / 7 };
+}
+function triVao(data, comps) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, comps, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  return { vao, count: data.length / comps };
+}
+
+const roomMesh = meshVao(roomData);
+const skyMesh = meshVao(skyData);
+const ctrlMesh = meshVao(ctrlData);
+const quadVerts = [-1,-1, 1,-1, -1,1, 1,1];
+const markerMesh = triVao(quadVerts, 2);
+const fullMesh = triVao(quadVerts, 2);
+const beamMesh = triVao([0,-1, 1,-1, 0,1, 1,1], 2);
+
+const SUN = norm([-0.72, 0.62, -0.10]);
+const POOLS = new Float32Array([
+  -1.90, -1.35, 1.50, 0.16,
+   1.90,  1.55, 1.50, 0.13,
+   0.00, -0.90, 2.30, 0.09,
+   0.00,  2.20, 2.30, 0.08
+]);
+
+/* ---------------- locomotion ---------------- */
+
+const player = [0, 0, 0];
+const MARGIN = 0.42;
+const MAX_TELE = 8.5;
+
+function floorHit(o, d) {
+  const ox = clamp(o[0], RM.x0 + 0.05, RM.x1 - 0.05);
+  const oy = clamp(o[1], 0.05, RM.y1 - 0.05);
+  const oz = clamp(o[2], RM.z0 + 0.05, RM.z1 - 0.05);
+  if (d[1] > -1e-4) return null;
+  const t = -oy / d[1];
+  if (t <= 0.05 || t > MAX_TELE) return null;
+  const crossT = (axis, coord, dirSign) =>
+    d[axis] * dirSign <= 0 ? -1 : (coord - o[axis]) / d[axis];
+  const walls = [
+    crossT(0, RM.x0, -1), crossT(0, RM.x1, 1),
+    crossT(2, RM.z0, -1), crossT(2, RM.z1, 1)
+  ];
+  for (const tc of walls) if (tc > 0.02 && tc < t - 0.02) return null;
+  const p = [ox + d[0]*t, 0, oz + d[2]*t];
+  if (p[0] < RM.x0 + MARGIN || p[0] > RM.x1 - MARGIN ||
+      p[2] < RM.z0 + MARGIN || p[2] > RM.z1 - MARGIN) return null;
+  return p;
+}
+
+let teleAnim = null;
+function teleport(target) {
+  teleAnim = { t: 0, hit: target, applied: false };
+}
+function updateTele(dt) {
+  if (!teleAnim) return 0;
+  teleAnim.t += dt;
+  if (!teleAnim.applied && teleAnim.t >= 0.13) {
+    player[0] += teleAnim.hit[0];
+    player[2] += teleAnim.hit[2];
+    teleAnim.applied = true;
+  }
+  let a;
+  if (teleAnim.t < 0.13) a = teleAnim.t / 0.13 * 0.75;
+  else a = Math.max(0, 0.75 * (1 - (teleAnim.t - 0.13) / 0.26));
+  if (teleAnim.t > 0.40) teleAnim = null;
+  return a;
+}
+
+/* ---------------- desktop controls ---------------- */
+
+const cam3 = { pos: [0, 1.65, 2.4], yaw: 0, pitch: -0.05 };
+const keys = new Set();
+let dragging = false, lastX = 0, lastY = 0;
+
+canvas.addEventListener('pointerdown', e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  cam3.yaw -= (e.clientX - lastX) * 0.005;
+  cam3.pitch = clamp(cam3.pitch - (e.clientY - lastY) * 0.005, -1.4, 1.4);
+  lastX = e.clientX; lastY = e.clientY;
+});
+const endDrag = () => { dragging = false; };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+window.addEventListener('keydown', e => {
+  keys.add(e.code);
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', e => keys.delete(e.code));
+
+function walk(dt) {
+  const spd = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? 3.2 : 1.7;
+  let f = 0, s = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) f += 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) f -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) s += 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) s -= 1;
+  if (!f && !s) return;
+  const fx = Math.sin(cam3.yaw), fz = -Math.cos(cam3.yaw);
+  const rx = Math.cos(cam3.yaw), rz = Math.sin(cam3.yaw);
+  const nx = player[0] + (fx*f + rx*s) * spd * dt;
+  const nz = player[2] + (fz*f + rz*s) * spd * dt;
+  player[0] = clamp(nx, RM.x0 + MARGIN - cam3.pos[0], RM.x1 - MARGIN - cam3.pos[0]);
+  player[2] = clamp(nz, RM.z0 + MARGIN - cam3.pos[2], RM.z1 - MARGIN - cam3.pos[2]);
+}
+
+/* ---------------- WebXR ---------------- */
+
+let xrSession = null, xrRefSpace = null, rafId = 0, centered = false;
+let aimSrc = null, aimHit = null, aimActive = false;
+const poses = new Map();
+
+async function enterVR() {
+  if (!navigator.xr) return;
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+    });
+    xrSession = session;
+    await gl.makeXRCompatible();
+    session.updateRenderState({
+      baseLayer: new XRWebGLLayer(session, gl, { antialias: true, alpha: false, depth: true })
+    });
+    try { xrRefSpace = await session.requestReferenceSpace('local-floor'); }
+    catch (e1) {
+      try { xrRefSpace = await session.requestReferenceSpace('bounded-floor'); }
+      catch (e2) { xrRefSpace = await session.requestReferenceSpace('local'); }
+    }
+    session.addEventListener('selectstart', e => { aimSrc = e.inputSource; aimActive = true; });
+    session.addEventListener('selectend', e => {
+      if (e.inputSource === aimSrc) {
+        aimActive = false;
+        if (aimHit) teleport(aimHit);
+      }
+    });
+    session.addEventListener('selectcancel', e => { if (e.inputSource === aimSrc) aimActive = false; });
+    session.addEventListener('end', () => {
+      xrSession = null; xrRefSpace = null; aimSrc = null; aimHit = null; aimActive = false;
+      centered = false; poses.clear();
+      document.body.classList.remove('inxr');
+      vrBtn.textContent = 'Войти в VR';
+      note('VR-сессия завершена.');
+      lastT = performance.now();
+      rafId = requestAnimationFrame(desktopFrame);
+    });
+    document.body.classList.add('inxr');
+    centered = false;
+    vrBtn.textContent = 'Выйти из VR';
+    vrBtn.onclick = () => xrSession && xrSession.end();
+    session.requestAnimationFrame(xrFrame);
+  } catch (e) {
+    note('Не удалось войти в VR: ' + e.message + ' — для WebXR нужен https или localhost.');
+  }
+}
+
+function updateInput(frame) {
+  poses.clear();
+  aimHit = null;
+  for (const src of xrSession.inputSources) {
+    if (!src.targetRaySpace) continue;
+    const pose = frame.getPose(src.targetRaySpace, xrRefSpace);
+    if (!pose) continue;
+    poses.set(src, pose.transform.matrix);
+    const m = pose.transform.matrix;
+    const o = [m[12] + player[0], m[13] + player[1], m[14] + player[2]];
+    const d = norm([-m[8], -m[9], -m[10]]);
+    if (src === aimSrc && aimActive) {
+      const hit = floorHit(o, d);
+      if (hit) aimHit = hit;
+    }
+  }
+}
+
+let lastT = performance.now();
+
+function xrFrame(t, frame) {
+  xrSession.requestAnimationFrame(xrFrame);
+  const dt = Math.min((t - lastT) / 1000, 0.1); lastT = t;
+  const fade = updateTele(dt);
+
+  const layer = xrSession.renderState.baseLayer;
+  const pose = frame.getViewerPose(xrRefSpace);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  gl.clearColor(0.9, 0.92, 0.95, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!pose) return;
+
+  if (!centered) {
+    player[0] = -pose.transform.position.x;
+    player[2] = -pose.transform.position.z;
+    player[1] = 0;
+    centered = true;
+  }
+  updateInput(frame);
+
+  for (const view of pose.views) {
+    const vp = layer.getViewport(view);
+    const viewMat = offsetView(view.transform.inverse.matrix, player);
+    drawView(view.projectionMatrix, viewMat, vp.x, vp.y, vp.width, vp.height, fade);
+  }
+}
+
+/* ---------------- drawing ---------------- */
+
+function setRoomGlobals(proj, viewMat, fade) {
+  const u = room.u;
+  const cam = camFromView(viewMat);
+  gl.uniformMatrix4fv(u.uProj, false, proj);
+  gl.uniformMatrix4fv(u.uView, false, viewMat);
+  gl.uniformMatrix4fv(u.uModel, false, IDENT);
+  gl.uniform3fv(u.uCam, cam);
+  gl.uniform3fv(u.uFwd, fwdFromView(viewMat));
+  gl.uniform3fv(u.uSun, SUN);
+  gl.uniform3fv(u.uRoomMin, [RM.x0, RM.y0, RM.z0]);
+  gl.uniform3fv(u.uRoomMax, [RM.x1, RM.y1, RM.z1]);
+  gl.uniform4fv(u.uPool, POOLS);
+  gl.uniform1f(u.uVig, 0.10 + fade * 0.45);
+  gl.uniform1f(u.uDyn, 0);
+  gl.uniform1f(u.uAOScale, 1);
+}
+
+function drawView(proj, viewMat, x, y, w, h, fade) {
+  gl.viewport(x, y, w, h);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthMask(true);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+
+  gl.useProgram(room.p);
+  setRoomGlobals(proj, viewMat, fade);
+
+  gl.disable(gl.DEPTH_TEST);
+  gl.depthMask(false);
+  gl.bindVertexArray(skyMesh.vao);
+  gl.drawArrays(gl.TRIANGLES, 0, skyMesh.count);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthMask(true);
+
+  gl.bindVertexArray(roomMesh.vao);
+  gl.drawArrays(gl.TRIANGLES, 0, roomMesh.count);
+
+  const u = room.u;
+  gl.uniform1f(u.uDyn, 1);
+  gl.uniform3fv(u.uDynAlbedo, [0.30, 0.315, 0.34]);
+  gl.uniform1f(u.uAOScale, 0.35);
+  const model = new Float32Array(16);
+  for (const m of poses.values()) {
+    model.set(m);
+    model[12] += player[0]; model[13] += player[1]; model[14] += player[2];
+    gl.uniformMatrix4fv(u.uModel, false, model);
+    gl.bindVertexArray(ctrlMesh.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, ctrlMesh.count);
+  }
+  gl.uniformMatrix4fv(u.uModel, false, IDENT);
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.depthMask(false);
+
+  if (aimActive && aimHit) {
+    gl.useProgram(marker.p);
+    gl.uniformMatrix4fv(marker.u.uProj, false, proj);
+    gl.uniformMatrix4fv(marker.u.uView, false, viewMat);
+    gl.uniform3fv(marker.u.uCenter, aimHit);
+    gl.uniform1f(marker.u.uSize, 0.7);
+    gl.bindVertexArray(markerMesh.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, markerMesh.count);
+  }
+
+  gl.useProgram(beam.p);
+  gl.uniformMatrix4fv(beam.u.uProj, false, proj);
+  gl.uniformMatrix4fv(beam.u.uView, false, viewMat);
+  gl.uniform3fv(beam.u.uCam, camFromView(viewMat));
+  gl.uniform4f(beam.u.uCol, 0.20, 0.34, 0.62, 0.55);
+  gl.bindVertexArray(beamMesh.vao);
+  for (const m of poses.values()) {
+    const o = [m[12] + player[0], m[13] + player[1], m[14] + player[2]];
+    const d = norm([-m[8], -m[9], -m[10]]);
+    let len = 0.55;
+    if (aimActive && aimHit) {
+      len = Math.hypot(aimHit[0]-o[0], aimHit[1]-o[1], aimHit[2]-o[2]);
+    }
+    gl.uniform3fv(beam.u.uO, o);
+    gl.uniform3fv(beam.u.uD, d);
+    gl.uniform1f(beam.u.uLen, len);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, beamMesh.count);
+  }
+
+  if (fade > 0.001) {
+    gl.useProgram(full.p);
+    gl.uniform4f(full.u.uCol, 0, 0, 0, fade);
+    gl.bindVertexArray(fullMesh.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, fullMesh.count);
+  }
+
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+
+function desktopFrame(t) {
+  if (xrSession) return;
+  rafId = requestAnimationFrame(desktopFrame);
+  const dt = Math.min((t - lastT) / 1000, 0.1); lastT = t;
+  const fade = updateTele(dt);
+  walk(dt);
+  resize();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.clearColor(0.9, 0.92, 0.95, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  const proj = perspective(1.05, canvas.width / canvas.height, 0.03, 200);
+  const viewMat = offsetView(lookView(cam3.pos, cam3.yaw, cam3.pitch), player);
+  drawView(proj, viewMat, 0, 0, canvas.width, canvas.height, fade);
+  const glErr = gl.getError();
+  if (glErr) fail('WebGL ошибка 0x' + glErr.toString(16));
+}
+
+/* ---------------- boot ---------------- */
+
+gl.enable(gl.DEPTH_TEST);
+
+if (navigator.xr && navigator.xr.isSessionSupported) {
+  navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+    if (ok) {
+      vrBtn.disabled = false;
+      vrBtn.onclick = () => (xrSession ? xrSession.end() : enterVR());
+      note('WebXR найден. Нажми «Войти в VR». Если шлем не виден — нужен https или localhost.');
+    } else {
+      vrBtn.disabled = true;
+      note('WebXR VR-устройство не найдено. Работает режим обзора: мышь + WASD.');
+    }
+  }).catch(e => note('WebXR недоступен: ' + e.message));
+} else {
+  note('WebXR в этом браузере нет. Работает режим обзора: мышь + WASD.');
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+// Стартовый вид можно задать адресом: index.html?yaw=1.2&pitch=-0.1
+const qs = new URLSearchParams(location.search);
+for (const k of ['yaw', 'pitch']) {
+  const v = parseFloat(qs.get(k));
+  if (Number.isFinite(v)) cam3[k] = clamp(v, -Math.PI*2, Math.PI*2);
+}
+
+lastT = performance.now();
+rafId = requestAnimationFrame(desktopFrame);
+</script>
+</body>
+</html>
