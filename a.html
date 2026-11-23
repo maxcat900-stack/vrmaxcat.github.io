@@ -3,43 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Белая VR-комната</title>
+<title>Густой лес · WebXR</title>
 <style>
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #eef1f5;
-    font-family: system-ui, "Segoe UI", Roboto, sans-serif; color: #1b1f24; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #b9c6d4;
+    font-family: system-ui, "Segoe UI", Roboto, sans-serif; color: #16202a; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  #hud { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
-    max-width: min(94vw, 700px); padding: 12px 14px; border-radius: 14px;
-    background: rgba(255,255,255,.84); border: 1px solid rgba(0,0,0,.08);
-    box-shadow: 0 8px 30px rgba(20,30,50,.14); backdrop-filter: blur(8px); }
+  #hud { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    max-width: min(94vw, 720px); padding: 12px 14px; border-radius: 14px;
+    background: rgba(255,255,255,.86); border: 1px solid rgba(0,0,0,.10);
+    box-shadow: 0 8px 30px rgba(20,30,50,.16); backdrop-filter: blur(8px); }
   body.inxr #hud { display: none; }
   #hud h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
-  #status { margin: 0 0 9px; font-size: 13px; line-height: 1.45; color: #333b45; }
-  .keys { margin: 8px 0 0; font-size: 12px; color: #55606d; line-height: 1.4; }
+  #status { margin: 0 0 9px; font-size: 13px; line-height: 1.45; color: #2c3641; }
+  .keys { margin: 8px 0 0; font-size: 12px; color: #4d5865; line-height: 1.45; }
+  .perf { margin: 6px 0 0; font-size: 11px; color: #6b7480; font-variant-numeric: tabular-nums; }
   button { font: inherit; font-size: 14px; padding: 9px 16px; border-radius: 10px;
-    border: 1px solid #1f6feb; background: #1f6feb; color: #fff; cursor: pointer; }
-  button[disabled] { background: #ccd3db; border-color: #ccd3db; color: #6b7480; cursor: not-allowed; }
+    border: 1px solid #1864ab; background: #1864ab; color: #fff; cursor: pointer; }
+  button[disabled] { background: #c3ccd6; border-color: #c3ccd6; color: #64707d; cursor: not-allowed; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="hud">
-  <h1>Белая VR-комната · 6 × 8 × 3 м</h1>
+  <h1>Густой лес · сосны, берёзы, дубы, грибы</h1>
   <p id="status">Загрузка…</p>
   <button id="vr" disabled>Войти в VR</button>
   <p class="keys">Мышь — осмотр &nbsp;·&nbsp; W A S D / стрелки — идти &nbsp;·&nbsp; Shift — быстрее<br>
-  В шлеме: наведись контроллером на пол (куржок) и отпусти trigger — телепорт.</p>
+  В шлеме: стик — ходьба &nbsp;·&nbsp; наведись контроллером на землю и отпусти trigger — телепорт &nbsp;·&nbsp; тачпад — поворот</p>
+  <p class="perf" id="perf"></p>
 </div>
 <script>
 'use strict';
 
+const QS = new URLSearchParams(location.search);
+const SEED = (() => {
+  const s = QS.get('seed');
+  return s === null ? 20261123 : (Math.abs(Math.trunc(parseFloat(s) || 0)) || 1);
+})();
+
 const canvas = document.getElementById('c');
 const statusEl = document.getElementById('status');
+const perfEl = document.getElementById('perf');
 const vrBtn = document.getElementById('vr');
+
 let fatal = null;
 const note = m => { if (!fatal) statusEl.textContent = m; };
-const fail = m => { fatal = m; statusEl.textContent = m; console.error(m); };
+const fail = m => { if (!fatal) { fatal = m; statusEl.textContent = m; vrBtn.disabled = true; } console.error(m); };
 
 window.addEventListener('error', e => fail('Ошибка JS: ' + e.message + ' (строка ' + e.lineno + ')'));
 
@@ -47,17 +57,42 @@ const gl = canvas.getContext('webgl2', {
   antialias: true, alpha: false, depth: true, stencil: false,
   xrCompatible: true, powerPreference: 'high-performance'
 });
-if (!gl) fail('WebGL2 недоступен — открой в свежем Chrome/Edge/Firefox.');
-
+if (!gl) fail('WebGL2 недоступен — открой в свежем Edge/Chrome.');
 /* ---------------- math ---------------- */
+
+const TAU = Math.PI * 2;
+const clamp = (x, a, b) => x < a ? a : (x > b ? b : x);
 
 const norm = v => {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
   return [v[0] / l, v[1] / l, v[2] / l];
 };
 const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
-const clamp = (x, a, b) => x < a ? a : (x > b ? b : x);
-const IDENT = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+
+function mulberry32(a) {
+  let t = a >>> 0;
+  return function () {
+    t = (t + 0x6D2B79F5) >>> 0;
+    let x = Math.imul(t ^ (t >>> 15), 1 | t);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function hash2(x, y) {
+  let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+function vnoise(x, y) {
+  const i = Math.floor(x), j = Math.floor(y);
+  let fx = x - i, fy = y - j;
+  fx = fx * fx * (3 - 2 * fx);
+  fy = fy * fy * (3 - 2 * fy);
+  const a = hash2(i, j), b = hash2(i + 1, j), c = hash2(i, j + 1), d = hash2(i + 1, j + 1);
+  return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy;
+}
 
 function perspective(fovy, aspect, near, far) {
   const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
@@ -69,10 +104,9 @@ function perspective(fovy, aspect, near, far) {
   ]);
 }
 
-// View = Rx(-pitch) * Ry(-yaw) * T(-pos), column-major.
+// View matrix: eye at pos looking along yaw/pitch. Column-major.
 function lookView(pos, yaw, pitch) {
   const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-  // world-space camera basis: right, up, back (camera looks along -back)
   const r = [cy, 0, sy];
   const b = [-sy*cp, -sp, cy*cp];
   const u = [-sp*sy, cp, sp*cy];
@@ -87,249 +121,644 @@ function lookView(pos, yaw, pitch) {
   ]);
 }
 
-function camFromView(v) {
-  const tx = v[12], ty = v[13], tz = v[14];
-  return [
-    -(v[0]*tx + v[4]*ty + v[8]*tz),
-    -(v[1]*tx + v[5]*ty + v[9]*tz),
-    -(v[2]*tx + v[6]*ty + v[10]*tz)
-  ];
-}
-const fwdFromView = v => norm([-v[2], -v[6], -v[10]]);
+const IDENT4 = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
 
-// Post-multiply a view matrix by T(-offset): moves the player by +offset in world.
-function offsetView(src, off) {
-  const m = new Float32Array(16);
-  m.set(src);
-  m[12] = src[0]*-off[0] + src[4]*-off[1] + src[8]*-off[2] + src[12];
-  m[13] = src[1]*-off[0] + src[5]*-off[1] + src[9]*-off[2] + src[13];
-  m[14] = src[2]*-off[0] + src[6]*-off[1] + src[10]*-off[2] + src[14];
-  return m;
+function mul4(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      o[c*4+r] = a[r]*b[c*4] + a[4+r]*b[c*4+1] + a[8+r]*b[c*4+2] + a[12+r]*b[c*4+3];
+    }
+  }
+  return o;
 }
 
-/* ---------------- room geometry ---------------- */
-
-const RM = { x0: -3, x1: 3, z0: -4, z1: 4, y0: 0, y1: 3, thk: 0.18 };
-const MAT = { WALL: 0, FLOOR: 1, GLASS: 2, OUT: 3, SKY: 4 };
-
-function quad(arr, a, b, c, d, mat) {
-  const n = norm(cross([b[0]-a[0], b[1]-a[1], b[2]-a[2]], [c[0]-a[0], c[1]-a[1], c[2]-a[2]]));
-  const push = p => { arr.push(p[0], p[1], p[2], n[0], n[1], n[2], mat); };
-  push(a); push(b); push(c); push(a); push(c); push(d);
+// Scene -> reference-space transform: rotate by `turn` about the anchor, then place
+// the scene point `pl` (the viewer's feet) on top of the anchor point `hf`.
+function locoMat(pl, hf, turn) {
+  const c = Math.cos(turn), s = Math.sin(turn);
+  return new Float32Array([
+    c, 0, -s, 0,
+    0, 1, 0, 0,
+    s, 0, c, 0,
+    -(c*pl[0] + s*pl[2]) + hf[0],
+    -pl[1] + hf[1],
+    (s*pl[0] - c*pl[2]) + hf[2],
+    1
+  ]);
 }
 
-function rect(arr, O, A, B, u0, u1, v0, v1, mat) {
-  if (u1 - u0 < 1e-4 || v1 - v0 < 1e-4) return;
-  const P = (u, v) => [O[0]+A[0]*u+B[0]*v, O[1]+A[1]*u+B[1]*v, O[2]+A[2]*u+B[2]*v];
-  quad(arr, P(u0,v0), P(u1,v0), P(u1,v1), P(u0,v1), mat);
+// Inverse of locoMat: reference space -> scene.
+function locoInv(pl, hf, turn) {
+  const c = Math.cos(turn), s = Math.sin(turn);
+  return new Float32Array([
+    c, 0, s, 0,
+    0, 1, 0, 0,
+    -s, 0, c, 0,
+    pl[0] - (c*hf[0] - s*hf[2]),
+    pl[1] - hf[1],
+    pl[2] - (s*hf[0] + c*hf[2]),
+    1
+  ]);
 }
 
-// Wall panel in plane (O,A,B) with one rectangular hole given in (u,v).
-function wall(arr, O, A, B, nin, u0, u1, v0, v1, hole) {
-  if (!hole) { rect(arr, O, A, B, u0, u1, v0, v1, MAT.WALL); return; }
-  const [hu0, hu1, hv0, hv1] = hole;
-  rect(arr, O, A, B, u0, u1, v0, hv0, MAT.WALL);
-  rect(arr, O, A, B, u0, u1, hv1, v1, MAT.WALL);
-  rect(arr, O, A, B, u0, hu0, Math.max(hv0, v0), Math.min(hv1, v1), MAT.WALL);
-  rect(arr, O, A, B, hu1, u1, Math.max(hv0, v0), Math.min(hv1, v1), MAT.WALL);
-  // reveal (wall thickness)
-  const T = RM.thk;
-  const P = (u, v, s) => [O[0]+A[0]*u+B[0]*v-nin[0]*T*s, O[1]+A[1]*u+B[1]*v-nin[1]*T*s, O[2]+A[2]*u+B[2]*v-nin[2]*T*s];
-  quad(arr, P(hu0,hv0,0), P(hu0,hv1,0), P(hu0,hv1,1), P(hu0,hv0,1), MAT.WALL);
-  quad(arr, P(hu1,hv0,1), P(hu1,hv1,1), P(hu1,hv1,0), P(hu1,hv0,0), MAT.WALL);
-  quad(arr, P(hu0,hv1,0), P(hu1,hv1,0), P(hu1,hv1,1), P(hu0,hv1,1), MAT.WALL);
-  quad(arr, P(hu0,hv0,1), P(hu1,hv0,1), P(hu1,hv0,0), P(hu0,hv0,0), MAT.WALL);
+const xformP = (m, p) => [
+  m[0]*p[0] + m[4]*p[1] + m[8]*p[2] + m[12],
+  m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13],
+  m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14]
+];
+const xformD = (m, d) => norm([
+  m[0]*d[0] + m[4]*d[1] + m[8]*d[2],
+  m[1]*d[0] + m[5]*d[1] + m[9]*d[2],
+  m[2]*d[0] + m[6]*d[1] + m[10]*d[2]
+]);
+/* ---------------- geometry builders (flat shaded, non-indexed) ----------------
+   Vertex layout: pos(3) nrm(3) col(3) sway(1) trans(1) = 11 floats.
+   Winding is irrelevant: faces are drawn without culling and the fragment
+   shader flips the normal towards the viewer. */
+
+const VSTR = 11;
+
+function pv(g, p, n, col, sw, tr) {
+  g.push(p[0], p[1], p[2], n[0], n[1], n[2], col[0], col[1], col[2], sw, tr);
 }
 
-function glass(arr, O, A, B, nin, hole) {
-  const [hu0, hu1, hv0, hv1] = hole;
-  const P = (u, v) => [O[0]+A[0]*u+B[0]*v-nin[0]*RM.thk*0.5, O[1]+A[1]*u+B[1]*v-nin[1]*RM.thk*0.5, O[2]+A[2]*u+B[2]*v-nin[2]*RM.thk*0.5];
-  quad(arr, P(hu0,hv0), P(hu1,hv0), P(hu1,hv1), P(hu0,hv1), MAT.GLASS);
+function faceN(a, b, c) {
+  return norm([
+    (b[1]-a[1])*(c[2]-a[2]) - (b[2]-a[2])*(c[1]-a[1]),
+    (b[2]-a[2])*(c[0]-a[0]) - (b[0]-a[2])*(c[2]-a[0]),
+    (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
+  ]);
 }
 
-function sphere(arr, rad, seg, rings, mat) {
-  const P = (t, p) => [rad*Math.sin(t)*Math.cos(p), rad*Math.cos(t), rad*Math.sin(t)*Math.sin(p)];
+function ftri(g, a, b, c, col, sw, tr) {
+  const n = faceN(a, b, c);
+  pv(g, a, n, col, sw, tr); pv(g, b, n, col, sw, tr); pv(g, c, n, col, sw, tr);
+}
+
+function fquad(g, a, b, c, d, col, sw, tr) { ftri(g, a, b, c, col, sw, tr); ftri(g, a, c, d, col, sw, tr); }
+
+function tube(g, p0, p1, r0, r1, seg, col, sw, tr) {
+  const ax = norm([p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]]);
+  const u = norm(cross(Math.abs(ax[1]) < 0.9 ? [0,1,0] : [1,0,0], ax));
+  const v = cross(ax, u);
+  const ring = (t, r, a) => {
+    const c = Math.cos(a), s = Math.sin(a);
+    return [p0[0]+(p1[0]-p0[0])*t + (u[0]*c + v[0]*s)*r,
+            p0[1]+(p1[1]-p0[1])*t + (u[1]*c + v[1]*s)*r,
+            p0[2]+(p1[2]-p0[2])*t + (u[2]*c + v[2]*s)*r];
+  };
+  for (let j = 0; j < seg; j++) {
+    const a0 = TAU*j/seg, a1 = TAU*(j+1)/seg;
+    fquad(g, ring(0,r0,a0), ring(1,r1,a0), ring(1,r1,a1), ring(0,r0,a1), col, sw, tr);
+  }
+}
+
+function coneUp(g, c, r, h, seg, col, sw, tr) {
+  const apex = [c[0], c[1]+h, c[2]];
+  const rp = j => { const a = TAU*j/seg; return [c[0]+r*Math.cos(a), c[1], c[2]+r*Math.sin(a)]; };
+  for (let j = 0; j < seg; j++) ftri(g, rp(j), rp(j+1), apex, col, sw, tr);
+}
+
+function blob(g, c, r, sy, jit, seg, rings, col, sw, tr, rnd) {
+  const R = [];
+  for (let i = 0; i <= rings; i++) for (let j = 0; j <= seg; j++) R.push(1 + (rnd()-0.5)*jit);
+  const P = (i, j) => {
+    const t = Math.PI*i/rings, p = TAU*j/seg, q = R[i*(seg+1)+j]*r;
+    return [c[0] + q*Math.sin(t)*Math.cos(p), c[1] + q*Math.cos(t)*sy, c[2] + q*Math.sin(t)*Math.sin(p)];
+  };
   for (let i = 0; i < rings; i++) {
-    const t0 = Math.PI*i/rings, t1 = Math.PI*(i+1)/rings;
     for (let j = 0; j < seg; j++) {
-      const p0 = 2*Math.PI*j/seg, p1 = 2*Math.PI*(j+1)/seg;
-      quad(arr, P(t0,p0), P(t1,p0), P(t1,p1), P(t0,p1), mat);
+      const a = P(i,j), b = P(i+1,j), c2 = P(i+1,j+1), d = P(i,j+1);
+      const h = hash2(Math.round((a[0]+c2[0])*49), Math.round((a[2]+c2[2])*49) + Math.round((a[1]+c2[1])*49)*37);
+      const k = 0.86 + h*0.30;
+      fquad(g, a, b, c2, d, [col[0]*k, col[1]*k, col[2]*k], sw, tr);
     }
   }
 }
 
-function box(arr, c, h, rotX) {
-  const cs = Math.cos(rotX), sn = Math.sin(rotX);
-  const tf = p => [c[0]+p[0], c[1]+p[1]*cs-p[2]*sn, c[2]+p[1]*sn+p[2]*cs];
-  const q = (a, b, cc, d) => quad(arr, tf(a), tf(b), tf(cc), tf(d), MAT.WALL);
-  const [x, y, z] = h;
-  q([-x,-y,-z],[x,-y,-z],[x,y,-z],[-x,y,-z]);
-  q([x,-y,z],[-x,-y,z],[-x,y,z],[x,y,z]);
-  q([-x,y,-z],[x,y,-z],[x,y,z],[-x,y,z]);
-  q([-x,-y,z],[x,-y,z],[x,-y,-z],[-x,-y,-z]);
-  q([x,-y,-z],[x,-y,z],[x,y,z],[x,y,-z]);
-  q([-x,-y,z],[-x,-y,-z],[-x,y,-z],[-x,y,z]);
+function blade(g, x, z, h, w, ang, lean, col, sw) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const dx = c*lean*h, dz = s*lean*h, nx = -s*w, nz = c*w;
+  fquad(g,
+    [x - nx, 0, z - nz], [x + nx, 0, z + nz],
+    [x + dx + nx*0.12, h, z + dz + nz*0.12], [x + dx - nx*0.12, h, z + dz - nz*0.12],
+    col, sw, 0.55);
 }
 
-function torus(arr, cen, R, r, seg, sides) {
-  const P = (a, b) => {
-    const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b);
-    return [cen[0]+(R+r*cb)*ca, cen[1]+(R+r*cb)*sa, cen[2]+r*sb];
+function fitTop(g, target) {
+  let mx = 1e-4;
+  for (let i = 1; i < g.length; i += VSTR) if (g[i] > mx) mx = g[i];
+  const s = target / mx;
+  for (let i = 0; i < g.length; i += VSTR) { g[i] *= s; g[i+1] *= s; g[i+2] *= s; }
+  return s;
+}
+
+/* position-only meshes (ground, sky dome) */
+const PSTR = 3;
+function ptri(g, a, b, c) { g.push(a[0],a[1],a[2], b[0],b[1],b[2], c[0],c[1],c[2]); }
+
+function domeGeo(g, rad, seg, rings) {
+  const P = (i, j) => {
+    const t = Math.PI*i/rings, p = TAU*j/seg;
+    return [rad*Math.sin(t)*Math.cos(p), rad*Math.cos(t), rad*Math.sin(t)*Math.sin(p)];
   };
-  for (let i = 0; i < seg; i++) for (let j = 0; j < sides; j++) {
-    const a0 = 2*Math.PI*i/seg, a1 = 2*Math.PI*(i+1)/seg;
-    const b0 = 2*Math.PI*j/sides, b1 = 2*Math.PI*(j+1)/sides;
-    quad(arr, P(a0,b0), P(a1,b0), P(a1,b1), P(a0,b1), MAT.WALL);
+  for (let i = 0; i < rings; i++) for (let j = 0; j < seg; j++) {
+    ptri(g, P(i,j), P(i+1,j), P(i+1,j+1));
+    ptri(g, P(i,j), P(i+1,j+1), P(i,j+1));
   }
 }
+/* ---------------- forest generation ---------------- */
 
-const roomData = [];
-{
-  const W = RM.x1 - RM.x0, D = RM.z1 - RM.z0, H = RM.y1 - RM.y0;
+const FOREST_R = 74, CLEAR_R = 6.5, FENCE_R = 33;
+const worldRnd = mulberry32(SEED);
 
-  // floor + ceiling
-  rect(roomData, [RM.x0, RM.y0, RM.z0], [1,0,0], [0,0,1], 0, W, 0, D, MAT.FLOOR);
-  rect(roomData, [RM.x0, RM.y1, RM.z0], [1,0,0], [0,0,1], 0, W, 0, D, MAT.WALL);
+const NEDD = [0.088, 0.205, 0.075];
+const LEAF_B = [0.30, 0.40, 0.16];
+const LEAF_O = [0.21, 0.32, 0.13];
 
-  // back wall (z = z1)
-  wall(roomData, [RM.x0, RM.y0, RM.z1], [1,0,0], [0,1,0], [0,0,-1], 0, W, 0, H, null);
-  // front wall (z = z0) with doorway
-  wall(roomData, [RM.x0, RM.y0, RM.z0], [1,0,0], [0,1,0], [0,0,1], 0, W, 0, H,
-       [1.88, 3.12, 0, 2.10]);
-  // left wall (x = x0) with window
-  wall(roomData, [RM.x0, RM.y0, RM.z1], [0,0,-1], [0,1,0], [1,0,0], 0, D, 0, H,
-       [4.60, 6.40, 0.95, 2.45]);
-  glass(roomData, [RM.x0, RM.y0, RM.z1], [0,0,-1], [0,1,0], [1,0,0], [4.60, 6.40, 0.95, 2.45]);
-  // right wall (x = x1) with window
-  wall(roomData, [RM.x1, RM.y0, RM.z0], [0,0,1], [0,1,0], [-1,0,0], 0, D, 0, H,
-       [4.40, 6.20, 0.95, 2.45]);
-  glass(roomData, [RM.x1, RM.y0, RM.z0], [0,0,1], [0,1,0], [-1,0,0], [4.40, 6.20, 0.95, 2.45]);
-
-  // ceiling light panels (just under the ceiling plane)
-  const lp = RM.y1 - 0.012;
-  rect(roomData, [RM.x0, lp, RM.z0], [1,0,0], [0,0,1], 2.45, 3.55, 0.70, 3.30, MAT.GLASS);
-  rect(roomData, [RM.x0, lp, RM.z0], [1,0,0], [0,0,1], 2.45, 3.55, 4.70, 7.30, MAT.GLASS);
-
-  // outdoor ground seen through the doorway
-  rect(roomData, [-70, -0.08, -70], [1,0,0], [0,0,1], 0, 140, 0, 140, MAT.OUT);
+function pineGeo(r) {
+  const g = [], bark = [0.25, 0.18, 0.13], bark2 = [0.30, 0.225, 0.16];
+  tube(g, [0,0,0], [0,0.78,0], 0.021, 0.010, 6, bark, 0.006, 0);
+  tube(g, [0,0.78,0], [0.02,1.02,0], 0.010, 0.005, 5, bark2, 0.02, 0);
+  for (let i = 0; i < 3; i++) {
+    const a = TAU*(i + r()*0.8)/3, y = 0.40 + r()*0.20, L = 0.10 + r()*0.06;
+    const p0 = [Math.cos(a)*0.014, y, Math.sin(a)*0.014];
+    const p1 = [Math.cos(a)*L, y + L*0.35, Math.sin(a)*L];
+    tube(g, p0, p1, 0.009, 0.004, 4, bark2, 0.03, 0);
+    blob(g, [p1[0]*1.05, p1[1]+0.03, p1[2]*1.05], 0.085, 0.75, 0.4, 6, 3, NEDD, 0.05, 0.35, r);
+  }
+  for (let i = 0; i < 5; i++) {
+    const t = i/4, y = 0.60 + t*0.32, rad = 0.185 - t*0.115, h = 0.21 - t*0.06;
+    const k = 0.80 + t*0.55;
+    coneUp(g, [0,y,0], rad, h, 9, [NEDD[0]*k, NEDD[1]*k, NEDD[2]*k], 0.014 + t*0.03, 0.25);
+  }
+  coneUp(g, [0,0.98,0], 0.05, 0.11, 7, [0.115,0.27,0.10], 0.05, 0.3);
+  return g;
 }
 
-const skyData = [];
-sphere(skyData, 90, 40, 20, MAT.SKY);
+function birchGeo(r) {
+  const g = [], white = [0.80, 0.78, 0.73], dark = [0.13, 0.125, 0.12];
+  const A = [0,0,0], B = [0.025,0.54,0.012], C = [0.06,0.80,-0.02];
+  tube(g, A, B, 0.013, 0.0092, 7, white, 0.008, 0);
+  tube(g, B, C, 0.0092, 0.0055, 6, white, 0.02, 0);
+  for (let i = 0; i < 5; i++) {
+    const t = (0.10 + i*0.11 + r()*0.05)/0.54;
+    const y = t*0.54, x = A[0] + (B[0]-A[0])*t, z = A[2] + (B[2]-A[2])*t;
+    tube(g, [x, y, z], [x+0.005, y+0.022, z+0.002], 0.0138, 0.0128, 7, dark, 0.008, 0);
+  }
+  for (let i = 0; i < 3; i++) {
+    const a = TAU*(i + r()*0.7)/3, y = 0.55 + r()*0.15, L = 0.14 + r()*0.10;
+    tube(g, [Math.cos(a)*0.01, y, Math.sin(a)*0.01],
+            [Math.cos(a)*L, y + L*0.5, Math.sin(a)*L], 0.005, 0.0025, 4, white, 0.03, 0);
+  }
+  blob(g, [0.04,0.88,0], 0.21, 1.0, 0.5, 8, 4, LEAF_B, 0.055, 0.5, r);
+  blob(g, [0.21,0.74,-0.10], 0.15, 1.0, 0.5, 7, 4, [0.34,0.43,0.19], 0.065, 0.5, r);
+  blob(g, [-0.16,0.78,0.13], 0.14, 1.0, 0.5, 7, 4, LEAF_B, 0.065, 0.5, r);
+  blob(g, [0.02,1.05,0.07], 0.13, 0.9, 0.5, 7, 4, [0.38,0.46,0.21], 0.075, 0.5, r);
+  return g;
+}
 
-const ctrlData = [];
-box(ctrlData, [0, 0.006, -0.016], [0.021, 0.014, 0.046], 0);
-box(ctrlData, [0, -0.052, 0.028], [0.0135, 0.046, 0.0135], 0.32);
-torus(ctrlData, [0, 0, -0.058], 0.042, 0.0065, 22, 6);
+function oakGeo(r) {
+  const g = [], bark = [0.22, 0.185, 0.145];
+  tube(g, [0,0,0], [0.015,0.42,0.015], 0.042, 0.024, 7, bark, 0.004, 0);
+  for (let i = 0; i < 5; i++) {
+    const a = TAU*(i + r()*0.7)/5, y = 0.32 + r()*0.10, el = 0.30 + r()*0.22;
+    const p0 = [Math.cos(a)*0.016, y, Math.sin(a)*0.016];
+    const p1 = [Math.cos(a)*el, y + el*0.62, Math.sin(a)*el];
+    tube(g, p0, p1, 0.014, 0.006, 5, bark, 0.014, 0);
+    const cr = 0.17 + r()*0.10;
+    blob(g, [p1[0]*1.15, p1[1] + cr*0.45, p1[2]*1.15], cr, 0.85, 0.5, 8, 4, LEAF_O, 0.03, 0.4, r);
+  }
+  blob(g, [0,0.62,0], 0.25, 0.8, 0.5, 9, 4, [0.19,0.29,0.12], 0.025, 0.4, r);
+  return g;
+}
 
+function bushGeo(r) {
+  const g = [], twig = [0.26,0.24,0.15];
+  for (let i = 0; i < 4; i++) {
+    const a = TAU*r(), L = 0.25 + r()*0.2;
+    tube(g, [0,0,0], [Math.cos(a)*L, L*1.4, Math.sin(a)*L], 0.012, 0.006, 4, twig, 0.03, 0);
+  }
+  const cs = [[0,0.24,0],[0.26,0.20,0.08],[-0.20,0.21,-0.16],[0.05,0.42,-0.20]];
+  for (let i = 0; i < cs.length; i++) {
+    blob(g, cs[i], 0.26 + r()*0.06, 0.8, 0.55, 7, 4,
+      [0.15 + r()*0.08, 0.26 + r()*0.10, 0.10 + r()*0.05], 0.30, 0.45, r);
+  }
+  return g;
+}
+
+function grassGeo(r) {
+  const g = [];
+  for (let i = 0; i < 4; i++) {
+    const ang = TAU*i/4 + r()*0.7;
+    const k = 0.75 + r()*0.6;
+    blade(g, (r()-0.5)*0.12, (r()-0.5)*0.12, 0.55 + r()*0.45, 0.10,
+      ang, 0.22 + r()*0.4, [0.16*k, 0.28*k, 0.11*k], 0.10);
+  }
+  return g;
+}
+
+function mushGeo(r, cap, stem, squat) {
+  const g = [];
+  tube(g, [0,0,0], [0,0.58,0], 0.105, 0.078, 7, stem, 0, 0);
+  tube(g, [0,0.20,0], [0,0.27,0], 0.15, 0.13, 7, [stem[0]*1.05+0.03, stem[1]*1.05+0.03, stem[2]*1.03+0.03], 0, 0);
+  blob(g, [0,0.60,0], 0.30, squat, 0.12, 9, 4, cap, 0, 0.05, r);
+  blob(g, [0,0.56,0], 0.26, squat*0.5, 0.10, 8, 3, [cap[0]*0.55+0.20, cap[1]*0.55+0.22, cap[2]*0.5+0.20], 0, 0, r);
+  return g;
+}
+
+function rockGeo(r) {
+  const g = [];
+  blob(g, [0,0.30,0], 0.42, 0.62, 0.75, 8, 4, [0.40,0.40,0.39], 0, 0, r);
+  blob(g, [0.22,0.16,-0.14], 0.20, 0.7, 0.6, 6, 3, [0.34,0.34,0.33], 0, 0, r);
+  return g;
+}
+
+function logGeo(r) {
+  const g = [], bark = [0.27,0.20,0.14];
+  tube(g, [0,0.07,0], [0.86,0.085,0], 0.075, 0.055, 8, bark, 0, 0);
+  blob(g, [0.90,0.085,0], 0.055, 1.0, 0.5, 6, 3, [0.45,0.36,0.24], 0, 0, r);
+  for (let i = 0; i < 2; i++) {
+    const t = 0.25 + i*0.35, a = TAU*r();
+    tube(g, [t, 0.12, 0], [t + 0.06*Math.cos(a), 0.30, 0.06*Math.sin(a)], 0.02, 0.008, 4, bark, 0, 0);
+  }
+  return g;
+}
+
+/* instance kinds: geo (prototype), far (cull distance), pat (shader pattern) */
+const KINDS = [];
+function addKind(key, geo, far, pat, cap) {
+  const k = { key, geo, far, pat, list: [], cap };
+  KINDS.push(k);
+  return k;
+}
+
+const TREE_DEFS = [
+  { key: 'pine',  gap: 1.55, lo: 11, hi: 21, trunk: 0.021, w: 0.42, build: pineGeo,  cap: 640, shadow: [2.4, 0.24] },
+  { key: 'birch', gap: 1.80, lo: 8,  hi: 15, trunk: 0.013, w: 0.28, build: birchGeo, cap: 430, shadow: [1.9, 0.17] },
+  { key: 'oak',   gap: 3.30, lo: 8,  hi: 14, trunk: 0.040, w: 0.10, build: oakGeo,   cap: 155, shadow: [3.1, 0.24] },
+  { key: 'bush',  gap: 1.25, lo: 0.7, hi: 1.9, trunk: 0, w: 0.20, build: bushGeo,    cap: 400, shadow: [0.8, 0.10] }
+];
+const treeKinds = TREE_DEFS.map((d, i) => {
+  const geo = d.build(mulberry32(SEED + 1000 + i*77));
+  fitTop(geo, 1);
+  return addKind(d.key, geo, 56, 0, d.cap);
+});
+
+const grassKind = addKind('grass', grassGeo(mulberry32(SEED + 41)), 17, 0, 14000);
+const rockKind = addKind('rock', rockGeo(mulberry32(SEED + 42)), 60, 0, 150);
+const logKind = addKind('log', logGeo(mulberry32(SEED + 43)), 60, 0, 34);
+const mushDefs = [
+  { key: 'mush_red',    cap: [0.68,0.12,0.10], stem: [0.88,0.85,0.78], squat: 0.62, pat: 1 },
+  { key: 'mush_white',  cap: [0.34,0.23,0.15], stem: [0.85,0.82,0.74], squat: 0.55, pat: 0 },
+  { key: 'mush_orange', cap: [0.72,0.40,0.14], stem: [0.80,0.62,0.34], squat: 0.42, pat: 0 }
+];
+const mushKinds = mushDefs.map((d, i) =>
+  addKind(d.key, mushGeo(mulberry32(SEED + 50 + i), d.cap, d.stem, d.squat), 24, d.pat, 900));
+
+/* occupancy + collision grids */
+const occ = new Map(), OCELL = 2.5, OOFF = 400;
+const okey = (cx, cz) => (cx + OOFF)*1000 + (cz + OOFF);
+
+function occFree(x, z, r) {
+  const cx = Math.floor(x/OCELL), cz = Math.floor(z/OCELL), n = Math.ceil(r/OCELL);
+  for (let i = cx-n; i <= cx+n; i++) {
+    for (let j = cz-n; j <= cz+n; j++) {
+      const cell = occ.get(okey(i, j));
+      if (!cell) continue;
+      for (const p of cell) if ((p[0]-x)*(p[0]-x) + (p[1]-z)*(p[1]-z) < r*r) return false;
+    }
+  }
+  return true;
+}
+function occAdd(x, z) {
+  const k = okey(Math.floor(x/OCELL), Math.floor(z/OCELL));
+  let cell = occ.get(k);
+  if (!cell) { cell = []; occ.set(k, cell); }
+  cell.push([x, z]);
+}
+
+const COLLS = [];
+const cgrid = new Map(), CCELL = 4;
+function collAdd(x, z, r) {
+  if (r <= 0) return;
+  COLLS.push([x, z, r]);
+  const k = okey(Math.floor(x/CCELL), Math.floor(z/CCELL));
+  let cell = cgrid.get(k);
+  if (!cell) { cell = []; cgrid.set(k, cell); }
+  cell.push(COLLS.length - 1);
+}
+function collNear(x, z) {
+  const cx = Math.floor(x/CCELL), cz = Math.floor(z/CCELL), out = [];
+  for (let i = cx-1; i <= cx+1; i++) for (let j = cz-1; j <= cz+1; j++) {
+    const cell = cgrid.get(okey(i, j));
+    if (cell) for (const idx of cell) out.push(COLLS[idx]);
+  };
+  return out;
+}
+
+const densityAt = (x, z) => 0.5 + vnoise(x*0.055 + 131, z*0.055 - 47)*1.15;
+
+function pickTree(R) {
+  let s = R(), acc = 0;
+  for (const d of TREE_DEFS) { acc += d.w; if (s <= acc) return d; }
+  return TREE_DEFS[0];
+}
+
+function placeTrees() {
+  const rnd = mulberry32(SEED + 7);
+  const R = TREE_DEFS.map(() => 0), placed = [], byKey = {};
+  treeKinds.forEach(k => byKey[k.key] = k);
+  for (let t = 0; t < 90000; t++) {
+    const d = pickTree(rnd);
+    const di = TREE_DEFS.indexOf(d);
+    if (R[di] >= d.cap) continue;
+    const a = rnd()*TAU, rr = Math.sqrt(rnd())*FOREST_R;
+    const x = Math.cos(a)*rr, z = Math.sin(a)*rr;
+    if (rr < CLEAR_R + 0.4) continue;
+    const dens = clamp(densityAt(x, z), 0.55, 1.8);
+    const gap = d.gap/dens;
+    if (!occFree(x, z, gap*0.5)) continue;
+    occAdd(x, z);
+    R[di]++;
+    const h = d.lo + rnd()*(d.hi - d.lo);
+    const inst = [x, -0.02, z, h, rnd()*TAU, rnd()*2-1, rnd()*TAU, 0];
+    byKey[d.key].list.push(inst);
+    collAdd(x, z, d.trunk*h);
+    placed.push({ d, x, z, h });
+    if (placed.length >= 1700) break;
+  }
+  return placed;
+}
+
+function placeUndergrowth(placed) {
+  const rnd = mulberry32(SEED + 8);
+  const shadows = [];
+  const addShadow = (x, z, r, a) => shadows.push([x, z, r, a]);
+
+  for (const p of placed) {
+    const d = p.d;
+    if (d.shadow) addShadow(p.x, p.z, clamp(d.shadow[0]*p.h/(d.hi*0.9), 0.35, 3.6), d.shadow[1]);
+    if (d.trunk > 0) {
+      const prob = d.key === 'pine' ? 0.52 : d.key === 'birch' ? 0.46 : 0.34;
+      if (rnd() < prob) {
+        const n = 2 + Math.floor(rnd()*5);
+        for (let i = 0; i < n; i++) {
+          const a = rnd()*TAU, rr = d.trunk*p.h + 0.25 + rnd()*2.2;
+          const mx = p.x + Math.cos(a)*rr, mz = p.z + Math.sin(a)*rr;
+          if (Math.hypot(mx, mz) > FOREST_R - 2) continue;
+          const s = 0.09 + rnd()*0.18;
+          const k = rnd();
+          const kind = k < 0.4 ? mushKinds[0] : k < 0.75 ? mushKinds[1] : mushKinds[2];
+          if (kind.list.length >= kind.cap) continue;
+          kind.list.push([mx, 0, mz, s, rnd()*TAU, rnd()*2-1, 0, 0]);
+        }
+      }
+    }
+  }
+
+  // грибы поляны у точки старта — чтобы были видны сразу
+  for (let i = 0; i < 26; i++) {
+    const a = rnd()*TAU, rr = 1.2 + rnd()*(CLEAR_R - 1.6);
+    const mx = Math.cos(a)*rr, mz = Math.sin(a)*rr;
+    const s = 0.11 + rnd()*0.19;
+    const k = rnd();
+    const kind = k < 0.35 ? mushKinds[0] : k < 0.7 ? mushKinds[1] : mushKinds[2];
+    kind.list.push([mx, 0, mz, s, rnd()*TAU, rnd()*2-1, 0, 0]);
+  }
+
+  // трава
+  const gocc = new Map();
+  for (let t = 0; t < 140000 && grassKind.list.length < grassKind.cap; t++) {
+    const a = rnd()*TAU, rr = Math.sqrt(rnd())*(FENCE_R + 7);
+    const x = Math.cos(a)*rr, z = Math.sin(a)*rr;
+    const key = okey(Math.floor(x/0.45), Math.floor(z/0.45));
+    if (gocc.has(key)) continue;
+    gocc.set(key, 1);
+    const s = 0.12 + rnd()*0.30;
+    grassKind.list.push([x, 0, z, s, rnd()*TAU, rnd()*2-1, rnd()*TAU, 0]);
+  }
+
+  // камни и валежник
+  for (let t = 0; t < 4000 && rockKind.list.length < rockKind.cap; t++) {
+    const a = rnd()*TAU, rr = CLEAR_R*0.5 + Math.sqrt(rnd())*FOREST_R*0.9;
+    const x = Math.cos(a)*rr, z = Math.sin(a)*rr;
+    if (!occFree(x, z, 2.2)) continue;
+    occAdd(x, z);
+    const s = 0.35 + rnd()*0.95;
+    rockKind.list.push([x, -0.05, z, s, rnd()*TAU, rnd()*2-1, 0, 0]);
+    collAdd(x, z, 0.30*s);
+    addShadow(x, z, 0.75*s, 0.20);
+  }
+  for (let t = 0; t < 3000 && logKind.list.length < logKind.cap; t++) {
+    const a = rnd()*TAU, rr = CLEAR_R + Math.sqrt(rnd())*(FENCE_R - 2);
+    const x = Math.cos(a)*rr, z = Math.sin(a)*rr;
+    if (!occFree(x, z, 3.2)) continue;
+    occAdd(x, z);
+    const len = 2.0 + rnd()*2.5;
+    logKind.list.push([x, 0, z, len, rnd()*TAU, rnd()*2-1, 0, 0]);
+    collAdd(x, z, 0.26);
+    addShadow(x, z, 0.55*len, 0.22);
+  }
+
+  return shadows;
+}
+
+const placedTrees = placeTrees();
+const shadowList = placeUndergrowth(placedTrees);
 /* ---------------- shaders ---------------- */
 
-const VS_ROOM = `#version 300 es
+const GL_HEAD = `const vec3 SUNDIR = vec3(0.496, 0.793, 0.353);
+const vec3 SUNC = vec3(1.00, 0.955, 0.87);
+const vec3 SKYAMB = vec3(0.40, 0.49, 0.60);
+const vec3 AMBGRD = vec3(0.27, 0.25, 0.19);
+uniform float uTime, uFogDens;
+float hash21(vec2 p){ p = fract(p*vec2(127.31, 311.7)); p += dot(p, p + 34.5); return fract(p.x*p.y); }
+float vn2(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f*f*(3.0 - 2.0*f);
+  float a = hash21(i), b = hash21(i + vec2(1,0)), c = hash21(i + vec2(0,1)), d = hash21(i + vec2(1,1));
+  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+}
+vec3 skyAt(vec3 d){
+  float t = clamp(d.y*0.5 + 0.5, 0.0, 1.0);
+  vec3 c = mix(vec3(0.80,0.86,0.93), vec3(0.26,0.47,0.80), smoothstep(0.50, 0.94, t));
+  c = mix(c, vec3(0.82,0.80,0.72), smoothstep(0.035, 0.0, abs(d.y)));
+  float sd = max(dot(normalize(d), SUNDIR), 0.0);
+  c += vec3(1.0,0.92,0.74)*(pow(sd, 320.0)*1.7 + pow(sd, 14.0)*0.20);
+  return c;
+}
+float fogAmt(float d){ float f = d*uFogDens; return 1.0 - exp(-f*f); }
+`;
+
+const VS_WORLD = `#version 300 es
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
-layout(location=2) in float aMat;
-uniform mat4 uProj, uView, uModel;
+layout(location=2) in vec3 aCol;
+layout(location=3) in vec2 aMisc;
+layout(location=4) in vec4 aOff;
+layout(location=5) in vec4 aRot;
+uniform mat4 uProj, uView;
+uniform float uWind;
 out vec3 vW;
 out vec3 vN;
-out float vMat;
-void main() {
-  vec4 wp = uModel * vec4(aPos, 1.0);
-  vW = wp.xyz;
-  vN = mat3(uModel) * aNrm;
-  vMat = aMat;
-  gl_Position = uProj * uView * wp;
+out vec3 vC;
+out vec3 vL;
+out float vTr;
+` + GL_HEAD + `
+void main(){
+  float sc = aOff.w;
+  vec3 p = aPos*sc;
+  float c = cos(aRot.x), s = sin(aRot.x);
+  p = vec3(p.x*c + p.z*s, p.y, -p.x*s + p.z*c);
+  float sw = aMisc.x;
+  if (sw > 0.0) {
+    float w = uTime*1.4 + aRot.z;
+    p.x += sin(w + p.y*0.8)*sw*uWind*sc;
+    p.z += cos(w*0.81 + p.y*0.6)*sw*uWind*0.85*sc;
+  }
+  vec3 wp = p + aOff.xyz;
+  vW = wp;
+  vL = aPos;
+  vTr = aMisc.y;
+  vN = vec3(aNrm.x*c + aNrm.z*s, aNrm.y, -aNrm.x*s + aNrm.z*c);
+  vC = aCol*(1.0 + aRot.y*0.13);
+  gl_Position = uProj*uView*vec4(wp, 1.0);
 }`;
 
-const FS_ROOM = `#version 300 es
+const FS_WORLD = `#version 300 es
 precision highp float;
 in vec3 vW;
 in vec3 vN;
-in float vMat;
-uniform vec3 uCam, uFwd, uSun, uDynAlbedo;
-uniform float uVig, uDyn, uAOScale;
-uniform vec3 uRoomMin, uRoomMax;
-uniform vec4 uPool[4];
+in vec3 vC;
+in vec3 vL;
+in float vTr;
+uniform vec3 uCam;
+uniform float uPat;
 out vec4 fragColor;
-
-vec3 skyAt(vec3 d) {
-  float t = clamp(d.y*0.5+0.5, 0.0, 1.0);
-  vec3 c = mix(vec3(0.86,0.90,0.95), vec3(0.45,0.63,0.90), smoothstep(0.48,0.88,t));
-  return c + vec3(0.34,0.30,0.24)*pow(max(dot(d,uSun),0.0), 24.0);
-}
-float poolF(vec4 P, vec2 p) {
-  vec2 d = p - P.xy;
-  return P.w*exp(-dot(d,d)/(P.z*P.z));
-}
-void main() {
+` + GL_HEAD + `
+void main(){
   vec3 n = normalize(vN);
   vec3 vd = vW - uCam;
   float dist = max(length(vd), 1e-4);
   vec3 v = vd/dist;
   if (dot(n, v) > 0.0) n = -n;
-
-  if (vMat > 3.5) { fragColor = vec4(skyAt(v), 1.0); return; }
-  if (vMat > 2.5) { fragColor = vec4(mix(skyAt(v), vec3(0.60,0.64,0.68), exp(-dist*0.035)), 1.0); return; }
-  if (vMat > 1.5) { fragColor = vec4(1.0,0.995,0.98,1.0); return; }
-
-  // Distance to the *other* room planes only: a point lying on its own surface
-  // is at distance 0 from it, which would otherwise darken every wall and the floor.
-  float dw = 1e9;
-  if (abs(n.x) < 0.5) dw = min(dw, min(vW.x-uRoomMin.x, uRoomMax.x-vW.x));
-  if (abs(n.z) < 0.5) dw = min(dw, min(vW.z-uRoomMin.z, uRoomMax.z-vW.z));
-  float df = n.y > 0.5 ? 1e9 : vW.y - uRoomMin.y;
-  float dc = n.y < -0.5 ? 1e9 : uRoomMax.y - vW.y;
-  float ao = 1.0;
-  ao *= 1.0 - 0.26*exp(-dw/0.40);
-  ao *= 1.0 - 0.30*exp(-df/0.50);
-  ao *= 1.0 - 0.20*exp(-dc/0.60);
-  ao *= 1.0 - 0.16*exp(-min(dw, min(df,dc))/0.11);
-  ao = mix(1.0, clamp(ao, 0.0, 1.0), uAOScale);
-
-  vec3 albedo = mix(mix(vec3(0.765,0.770,0.790), vec3(0.92,0.925,0.935), step(vMat, 0.5)), uDynAlbedo, uDyn);
-  float ndl = dot(n, uSun);
-  float diff = clamp((ndl+0.55)/1.55, 0.0, 1.0);
-  vec3 hemi = mix(vec3(0.80,0.81,0.83), vec3(0.99,1.0,1.03), 0.5+0.5*n.y);
-  vec3 fill = vec3(0.26,0.265,0.275);
-  float pools = poolF(uPool[0],vW.xz) + poolF(uPool[1],vW.xz) + poolF(uPool[2],vW.xz) + poolF(uPool[3],vW.xz);
-
-  vec3 col = albedo * ( hemi*0.70*ao + fill*(0.35+0.65*ao)
-              + vec3(1.0,0.985,0.96) * (diff*0.13*ao + pools*(0.45+0.40*max(ndl,0.0))) );
-
-  if (vMat > 0.5 && vMat < 1.5) {
-    vec2 c = vW.xz/0.5;
-    vec2 f = abs(fract(c)-0.5);
-    vec2 dd = fwidth(c);
-    vec2 aa = smoothstep(vec2(0.0), dd*1.6, f);
-    col *= 1.0 - 0.16*(1.0 - aa.x*aa.y);
+  vec3 alb = vC;
+  if (uPat > 0.5 && vL.y > 0.56) {
+    vec2 q = vec2(atan(vL.z, vL.x)*3.2, vL.y*13.0);
+    vec2 cell = floor(q), f = fract(q);
+    if (hash21(cell) > 0.60) {
+      float r = length(f - 0.5);
+      alb = mix(alb, vec3(0.93, 0.92, 0.87), clamp(0.95 - r*1.2, 0.0, 1.0));
+    }
   }
-  col *= mix(1.0, smoothstep(0.20, 0.92, dot(v, uFwd)), uVig);
+  float ndl = dot(n, SUNDIR);
+  float lam = max(ndl, 0.0);
+  float wrap = clamp((ndl + 0.45)/1.45, 0.0, 1.0);
+  vec3 hemi = mix(AMBGRD, SKYAMB, 0.5 + 0.5*n.y);
+  vec3 tr = SUNC*vec3(0.45, 0.62, 0.30)*vTr*max(-ndl, 0.0)*0.9;
+  vec3 col = alb*(hemi*(0.60 + 0.40*wrap) + SUNC*(0.62*lam + 0.30*wrap) + tr);
+  col = mix(col, skyAt(v), fogAmt(dist));
   fragColor = vec4(min(col, vec3(1.0)), 1.0);
+}`;
+
+const VS_SIMPLE = `#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uProj, uView;
+uniform vec3 uCenter;
+out vec3 vW;
+void main(){
+  vW = aPos + uCenter;
+  gl_Position = uProj*uView*vec4(vW, 1.0);
+}`;
+
+const FS_GROUND = `#version 300 es
+precision highp float;
+in vec3 vW;
+uniform vec3 uCam;
+out vec4 fragColor;
+` + GL_HEAD + `
+void main(){
+  vec2 p = vW.xz;
+  vec3 eye = vW - uCam;
+  float dist = max(length(eye), 1e-4);
+  float aa = clamp(2.0/(2.0 + (fwidth(p.x) + fwidth(p.y))*2.2), 0.0, 1.0);
+  float n1 = vn2(p*0.045 + 7.0);
+  float n2 = vn2(p*0.5 + 21.0);
+  float n3 = vn2(p*2.2 - 11.0);
+  vec3 moss = vec3(0.140, 0.220, 0.105);
+  vec3 dry  = vec3(0.29, 0.27, 0.155);
+  vec3 dirt = vec3(0.205, 0.165, 0.115);
+  vec3 alb = mix(moss, dry, smoothstep(0.40, 0.86, n2*0.5 + n1*0.5));
+  alb = mix(alb, dirt, smoothstep(0.72, 0.92, vn2(p*0.09 + 53.0)));
+  alb *= mix(1.0, mix(0.88, 1.18, n3), aa);
+  float dap = vn2(p*0.40 + vec2(uTime*0.045, uTime*0.030));
+  float shade = 0.86 + 0.32*dap;
+  vec3 hemi = mix(AMBGRD, SKYAMB, 0.92);
+  vec3 col = alb*shade*(hemi + SUNC*(0.55*SUNDIR.y + 0.22));
+  col = mix(col, col*vec3(1.06, 0.99, 0.86), smoothstep(0.42, 0.82, n1));
+  col = mix(col, skyAt(eye/dist), fogAmt(dist));
+  fragColor = vec4(min(col, vec3(1.0)), 1.0);
+}`;
+
+const FS_SKY = `#version 300 es
+precision highp float;
+in vec3 vW;
+uniform vec3 uCam;
+out vec4 fragColor;
+` + GL_HEAD + `
+void main(){
+  vec3 d = normalize(vW - uCam);
+  fragColor = vec4(min(skyAt(d), vec3(1.0)), 1.0);
+}`;
+
+const VS_SHADOW = `#version 300 es
+layout(location=0) in vec2 aCorner;
+layout(location=1) in vec4 aSh;
+uniform mat4 uProj, uView;
+out vec2 vUv;
+out float vA;
+void main(){
+  vUv = aCorner;
+  vA = aSh.w;
+  gl_Position = uProj*uView*vec4(aSh.x + aCorner.x*aSh.z, 0.02, aSh.y + aCorner.y*aSh.z, 1.0);
+}`;
+
+const FS_SHADOW = `#version 300 es
+precision highp float;
+in vec2 vUv;
+in float vA;
+out vec4 fragColor;
+void main(){
+  float r = length(vUv);
+  fragColor = vec4(0.05, 0.07, 0.05, smoothstep(1.0, 0.12, r)*vA);
 }`;
 
 const VS_MARKER = `#version 300 es
 layout(location=0) in vec2 aCorner;
 uniform mat4 uProj, uView;
 uniform vec3 uCenter;
-uniform float uSize;
+uniform float uSize, uTime;
 out vec2 vC;
-void main() {
+void main(){
   vC = aCorner;
-  vec3 p = vec3(uCenter.x + aCorner.x*uSize, 0.012, uCenter.z + aCorner.y*uSize);
-  gl_Position = uProj * uView * vec4(p, 1.0);
+  gl_Position = uProj*uView*vec4(uCenter.x + aCorner.x*uSize, 0.015, uCenter.z + aCorner.y*uSize, 1.0);
 }`;
 
 const FS_MARKER = `#version 300 es
 precision highp float;
 in vec2 vC;
-uniform float uSize;
+uniform float uSize, uTime;
 out vec4 fragColor;
-void main() {
+void main(){
   float r = length(vC)*uSize;
-  float ring = smoothstep(0.30,0.27,r) * smoothstep(0.19,0.22,r);
-  float dotc = smoothstep(0.055,0.030,r);
+  float pulse = 0.02*sin(uTime*6.0);
+  float ring = smoothstep(0.34 + pulse, 0.30 + pulse, r)*smoothstep(0.20, 0.24, r);
+  float dotc = smoothstep(0.06, 0.03, r);
   float glow = exp(-r*r*9.0)*0.35;
   float a = clamp(ring*0.85 + dotc*0.80 + glow, 0.0, 1.0);
-  vec3 c = mix(vec3(0.22,0.42,0.92), vec3(0.85,0.93,1.0), glow);
+  vec3 c = mix(vec3(0.16, 0.44, 0.90), vec3(0.85, 0.95, 1.0), glow);
   fragColor = vec4(c, a*0.92);
 }`;
 
@@ -339,13 +768,13 @@ uniform mat4 uProj, uView;
 uniform vec3 uO, uD, uCam;
 uniform float uLen;
 out float vT;
-void main() {
+void main(){
   float t = aTS.x*uLen;
   vec3 p = uO + uD*t;
-  vec3 side = normalize(cross(uD, normalize(uCam - p)));
+  vec3 side = normalize(cross(uD, normalize(uCam - p)) + vec3(1e-4, 0.0, 0.0));
   p += side*aTS.y*0.008;
   vT = aTS.x;
-  gl_Position = uProj * uView * vec4(p, 1.0);
+  gl_Position = uProj*uView*vec4(p, 1.0);
 }`;
 
 const FS_BEAM = `#version 300 es
@@ -353,17 +782,23 @@ precision highp float;
 in float vT;
 uniform vec4 uCol;
 out vec4 fragColor;
-void main() { fragColor = vec4(uCol.rgb, uCol.a*(1.0 - 0.45*vT)); }`;
+void main(){ fragColor = vec4(uCol.rgb, uCol.a*(1.0 - 0.45*vT)); }`;
 
 const VS_FULL = `#version 300 es
 layout(location=0) in vec2 aPos;
-void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }`;
 
 const FS_FULL = `#version 300 es
 precision highp float;
 uniform vec4 uCol;
+uniform float uVig;
+uniform vec2 uRes;
 out vec4 fragColor;
-void main() { fragColor = uCol; }`;
+void main(){
+  float r = length(gl_FragCoord.xy - 0.5*uRes)/max(uRes.x, uRes.y);
+  fragColor = vec4(uCol.rgb, clamp(uCol.a + uVig*smoothstep(0.20, 0.72, r), 0.0, 1.0));
+}`;
+/* ---------------- programs, buffers, VAOs ---------------- */
 
 function compile(type, src) {
   const s = gl.createShader(type);
@@ -372,10 +807,11 @@ function compile(type, src) {
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) fail('Шейдер: ' + gl.getShaderInfoLog(s));
   return s;
 }
-function program(vsrc, fsrc) {
+
+function program(vsSrc, fsSrc) {
   const p = gl.createProgram();
-  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsrc));
-  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsrc));
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) fail('Линковка: ' + gl.getProgramInfoLog(p));
   const u = {};
@@ -387,101 +823,466 @@ function program(vsrc, fsrc) {
   return { p, u };
 }
 
-const room = program(VS_ROOM, FS_ROOM);
-const marker = program(VS_MARKER, FS_MARKER);
-const beam = program(VS_BEAM, FS_BEAM);
-const full = program(VS_FULL, FS_FULL);
+const u1f = (u, n, v) => { if (u[n] != null) gl.uniform1f(u[n], v); };
+const u2f = (u, n, a, b) => { if (u[n] != null) gl.uniform2f(u[n], a, b); };
+const u3fv = (u, n, v) => { if (u[n] != null) gl.uniform3fv(u[n], v); };
+const u4f = (u, n, a, b, c, d) => { if (u[n] != null) gl.uniform4f(u[n], a, b, c, d); };
+const um4v = (u, n, v) => { if (u[n] != null) gl.uniformMatrix4fv(u[n], false, v); };
 
-/* ---------------- buffers ---------------- */
-
-function meshVao(data) {
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
-  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
-  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 24);
-  gl.bindVertexArray(null);
-  return { vao, count: data.length / 7 };
-}
-function triVao(data, comps) {
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, comps, gl.FLOAT, false, 0, 0);
-  gl.bindVertexArray(null);
-  return { vao, count: data.length / comps };
+function makeBuf(data, usage) {
+  const b = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, data instanceof Float32Array ? data : new Float32Array(data), usage);
+  return b;
 }
 
-const roomMesh = meshVao(roomData);
-const skyMesh = meshVao(skyData);
-const ctrlMesh = meshVao(ctrlData);
-const quadVerts = [-1,-1, 1,-1, -1,1, 1,1];
-const markerMesh = triVao(quadVerts, 2);
-const fullMesh = triVao(quadVerts, 2);
-const beamMesh = triVao([0,-1, 1,-1, 0,1, 1,1], 2);
+function triStrip(data, comps) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  makeBuf(data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, comps, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  return { vao, count: data.length/comps };
+}
 
-const SUN = norm([-0.72, 0.62, -0.10]);
-const POOLS = new Float32Array([
-  -1.90, -1.35, 1.50, 0.16,
-   1.90,  1.55, 1.50, 0.13,
-   0.00, -0.90, 2.30, 0.09,
-   0.00,  2.20, 2.30, 0.08
-]);
+const pWorld = program(VS_WORLD, FS_WORLD);
+const pGround = program(VS_SIMPLE, FS_GROUND);
+const pSky = program(VS_SIMPLE, FS_SKY);
+const pShadow = program(VS_SHADOW, FS_SHADOW);
+const pMarker = program(VS_MARKER, FS_MARKER);
+const pBeam = program(VS_BEAM, FS_BEAM);
+const pFull = program(VS_FULL, FS_FULL);
 
+const GROUND_HALF = 170, SKY_R = 85;
+const groundMesh = (() => {
+  const g = [];
+  const H = GROUND_HALF;
+  ptri(g, [-H, 0, -H], [H, 0, -H], [H, 0, H]);
+  ptri(g, [-H, 0, -H], [H, 0, H], [-H, 0, H]);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  makeBuf(g, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, PSTR, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  return { vao, count: g.length/PSTR };
+})();
+
+const skyMesh = (() => {
+  const g = [];
+  domeGeo(g, SKY_R, 22, 12);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  makeBuf(g, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, PSTR, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  return { vao, count: g.length/PSTR };
+})();
+
+/* kinds: prototype mesh + instance buffers (culled per frame) */
+const CONE_COS = 0.28, NEAR_KEEP = 9;
+const drawKinds = [];
+for (const k of KINDS) {
+  const n = k.list.length;
+  if (!n) continue;
+  const inst = new Float32Array(n*8);
+  for (let i = 0; i < n; i++) for (let j = 0; j < 8; j++) inst[i*8 + j] = k.list[i][j];
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  makeBuf(new Float32Array(k.geo), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, VSTR*4, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, VSTR*4, 12);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, VSTR*4, 24);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 2, gl.FLOAT, false, VSTR*4, 36);
+  const ib = makeBuf(new Float32Array(n*8), gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 4, gl.FLOAT, false, 32, 0); gl.vertexAttribDivisor(4, 1);
+  gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 4, gl.FLOAT, false, 32, 16); gl.vertexAttribDivisor(5, 1);
+  gl.bindVertexArray(null);
+  drawKinds.push({
+    key: k.key, pat: k.pat, far: k.far, vao, ib, n, vcount: k.geo.length/VSTR,
+    tris: k.geo.length/VSTR/3, inst, pack: new Float32Array(n*8), visible: 0
+  });
+}
+
+const shadowMesh = (() => {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  makeBuf([-1,-1, 1,-1, -1,1, 1,1], gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const inst = new Float32Array(shadowList.length*4);
+  for (let i = 0; i < shadowList.length; i++) for (let j = 0; j < 4; j++) inst[i*4 + j] = shadowList[i][j];
+  makeBuf(inst, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 16, 0); gl.vertexAttribDivisor(1, 1);
+  gl.bindVertexArray(null);
+  return { vao, count: 4, n: shadowList.length };
+})();
+
+const quadMesh = triStrip([-1,-1, 1,-1, -1,1, 1,1], 2);
+const beamMesh = triStrip([0,-1, 1,-1, 0,1, 1,1], 2);
+
+gl.disable(gl.CULL_FACE);
+gl.enable(gl.DEPTH_TEST);
+gl.depthFunc(gl.LESS);
+/* ---------------- rendering ---------------- */
+
+const FOG_DENS = 0.030, WIND = 0.05;
+const ZERO3 = new Float32Array([0, 0, 0]);
+let clock = 0, frameTris = 0, frameInst = 0;
+
+function drawInstances(kd, cx, cz, fx, fz) {
+  const s = kd.inst, pack = kd.pack, far2 = kd.far*kd.far;
+  let n = 0;
+  for (let o = 0; o < s.length; o += 8) {
+    const dx = s[o] - cx, dz = s[o+2] - cz;
+    const d2 = dx*dx + dz*dz;
+    if (d2 > far2) continue;
+    if (d2 > NEAR_KEEP) {
+      const inv = 1/Math.sqrt(d2);
+      if ((dx*inv)*fx + (dz*inv)*fz < CONE_COS) continue;
+    }
+    pack[n]   = s[o];   pack[n+1] = s[o+1]; pack[n+2] = s[o+2]; pack[n+3] = s[o+3];
+    pack[n+4] = s[o+4]; pack[n+5] = s[o+5]; pack[n+6] = s[o+6]; pack[n+7] = s[o+7];
+    n += 8;
+  }
+  kd.visible = n/8;
+  if (!n) return;
+  gl.bindVertexArray(kd.vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, kd.ib);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, pack, 0, n);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, kd.vcount, kd.visible);
+  frameInst += kd.visible;
+  frameTris += kd.visible*kd.tris;
+}
+
+function drawView(proj, viewMat, cam, fwd, vp, st) {
+  gl.viewport(vp.x, vp.y, vp.w, vp.h);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthMask(true);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+
+  gl.disable(gl.DEPTH_TEST);
+  gl.depthMask(false);
+  gl.useProgram(pSky.p);
+  um4v(pSky.u, 'uProj', proj); um4v(pSky.u, 'uView', viewMat);
+  u3fv(pSky.u, 'uCam', cam); u3fv(pSky.u, 'uCenter', cam);
+  u1f(pSky.u, 'uFogDens', FOG_DENS); u1f(pSky.u, 'uTime', clock);
+  gl.bindVertexArray(skyMesh.vao);
+  gl.drawArrays(gl.TRIANGLES, 0, skyMesh.count);
+  frameTris += skyMesh.count/3;
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthMask(true);
+  gl.useProgram(pGround.p);
+  um4v(pGround.u, 'uProj', proj); um4v(pGround.u, 'uView', viewMat);
+  u3fv(pGround.u, 'uCam', cam); u3fv(pGround.u, 'uCenter', ZERO3);
+  u1f(pGround.u, 'uFogDens', FOG_DENS); u1f(pGround.u, 'uTime', clock);
+  gl.bindVertexArray(groundMesh.vao);
+  gl.drawArrays(gl.TRIANGLES, 0, groundMesh.count);
+  frameTris += 2;
+
+  gl.useProgram(pWorld.p);
+  um4v(pWorld.u, 'uProj', proj); um4v(pWorld.u, 'uView', viewMat);
+  u3fv(pWorld.u, 'uCam', cam);
+  u1f(pWorld.u, 'uTime', clock); u1f(pWorld.u, 'uWind', WIND); u1f(pWorld.u, 'uFogDens', FOG_DENS);
+  for (const kd of drawKinds) {
+    u1f(pWorld.u, 'uPat', kd.pat);
+    drawInstances(kd, cam[0], cam[2], fwd[0], fwd[2]);
+  }
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.depthMask(false);
+
+  gl.useProgram(pShadow.p);
+  um4v(pShadow.u, 'uProj', proj); um4v(pShadow.u, 'uView', viewMat);
+  gl.bindVertexArray(shadowMesh.vao);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, shadowMesh.n);
+  frameTris += shadowMesh.n*2;
+
+  if (st.aimHit) {
+    gl.useProgram(pMarker.p);
+    um4v(pMarker.u, 'uProj', proj); um4v(pMarker.u, 'uView', viewMat);
+    u3fv(pMarker.u, 'uCenter', st.aimHit);
+    u1f(pMarker.u, 'uSize', 0.85); u1f(pMarker.u, 'uTime', clock);
+    gl.bindVertexArray(quadMesh.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  if (st.beams.length) {
+    gl.useProgram(pBeam.p);
+    um4v(pBeam.u, 'uProj', proj); um4v(pBeam.u, 'uView', viewMat);
+    u3fv(pBeam.u, 'uCam', cam);
+    for (const b of st.beams) {
+      u3fv(pBeam.u, 'uO', b.o); u3fv(pBeam.u, 'uD', b.d); u1f(pBeam.u, 'uLen', b.len);
+      u4f(pBeam.u, 'uCol', 0.25, 0.55, 0.95, b.aim ? 0.95 : 0.4);
+      gl.bindVertexArray(beamMesh.vao);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+  }
+
+  if (st.fade > 0.002 || st.vig > 0.002) {
+    gl.useProgram(pFull.p);
+    u4f(pFull.u, 'uCol', 0.02, 0.03, 0.03, st.fade);
+    u1f(pFull.u, 'uVig', st.vig);
+    u2f(pFull.u, 'uRes', vp.w, vp.h);
+    gl.bindVertexArray(quadMesh.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+}
 /* ---------------- locomotion ---------------- */
 
-const player = [0, 0, 0];
-const MARGIN = 0.42;
-const MAX_TELE = 8.5;
+const player = [0, 0, 7];
+let turn = 0;
+const EYE = [0, 1.62, 0];
+const PR = 0.30;
+const cam3 = { yaw: 0, pitch: -0.05 };
+let lastT = performance.now();
+
+function resolveCollisions(px, pz) {
+  let x = px, z = pz;
+  for (let it = 0; it < 3; it++) {
+    let moved = false;
+    for (const c of collNear(x, z)) {
+      const dx = x - c[0], dz = z - c[1], rr = c[2] + PR;
+      const d2 = dx*dx + dz*dz;
+      if (d2 >= rr*rr) continue;
+      if (d2 < 1e-8) { x += rr; moved = true; continue; }
+      const k = (rr - Math.sqrt(d2))/d2;
+      x += dx*k; z += dz*k; moved = true;
+    }
+    if (!moved) break;
+  }
+  return [x, z];
+}
+
+function clampFence(x, z) {
+  const d = Math.hypot(x, z);
+  return d > FENCE_R ? [x*FENCE_R/d, z*FENCE_R/d] : [x, z];
+}
+
+function tryMove(nx, nz) {
+  let p = clampFence(nx, nz);
+  p = resolveCollisions(p[0], p[1]);
+  p = clampFence(p[0], p[1]);
+  player[0] = p[0];
+  player[2] = p[1];
+}
+
+function pointBlocked(x, z) {
+  for (const c of collNear(x, z)) {
+    const rr = c[2] + PR;
+    if ((x-c[0])*(x-c[0]) + (z-c[1])*(z-c[1]) < rr*rr) return true;
+  }
+  return false;
+}
+
+function segBlocked(x0, z0, x1, z1) {
+  const len = Math.hypot(x1-x0, z1-z0);
+  const steps = Math.min(24, Math.max(1, Math.ceil(len/2)));
+  for (let i = 1; i <= steps; i++) {
+    const t = i/steps;
+    const x = x0 + (x1-x0)*t, z = z0 + (z1-z0)*t;
+    for (const c of collNear(x, z)) {
+      const rr = c[2] + 0.10;
+      if ((x-c[0])*(x-c[0]) + (z-c[1])*(z-c[1]) < rr*rr) return true;
+    }
+  }
+  return false;
+}
 
 function floorHit(o, d) {
-  const ox = clamp(o[0], RM.x0 + 0.05, RM.x1 - 0.05);
-  const oy = clamp(o[1], 0.05, RM.y1 - 0.05);
-  const oz = clamp(o[2], RM.z0 + 0.05, RM.z1 - 0.05);
-  if (d[1] > -1e-4) return null;
-  const t = -oy / d[1];
-  if (t <= 0.05 || t > MAX_TELE) return null;
-  const crossT = (axis, coord, dirSign) =>
-    d[axis] * dirSign <= 0 ? -1 : (coord - o[axis]) / d[axis];
-  const walls = [
-    crossT(0, RM.x0, -1), crossT(0, RM.x1, 1),
-    crossT(2, RM.z0, -1), crossT(2, RM.z1, 1)
-  ];
-  for (const tc of walls) if (tc > 0.02 && tc < t - 0.02) return null;
-  const p = [ox + d[0]*t, 0, oz + d[2]*t];
-  if (p[0] < RM.x0 + MARGIN || p[0] > RM.x1 - MARGIN ||
-      p[2] < RM.z0 + MARGIN || p[2] > RM.z1 - MARGIN) return null;
-  return p;
+  if (d[1] > -1e-3) return null;
+  const t = -o[1]/d[1];
+  if (t < 0.2 || t > 14) return null;
+  const px = o[0] + d[0]*t, pz = o[2] + d[2]*t;
+  if (Math.hypot(px, pz) > FENCE_R - 0.6) return null;
+  if (pointBlocked(px, pz) || segBlocked(o[0], o[2], px, pz)) return null;
+  return [px, 0, pz];
 }
 
 let teleAnim = null;
-function teleport(target) {
-  teleAnim = { t: 0, hit: target, applied: false };
-}
+function teleport(target) { teleAnim = { t: 0, hit: target, applied: false }; }
+
 function updateTele(dt) {
   if (!teleAnim) return 0;
   teleAnim.t += dt;
   if (!teleAnim.applied && teleAnim.t >= 0.13) {
-    player[0] += teleAnim.hit[0];
-    player[2] += teleAnim.hit[2];
+    player[0] = teleAnim.hit[0];
+    player[2] = teleAnim.hit[2];
     teleAnim.applied = true;
   }
   let a;
-  if (teleAnim.t < 0.13) a = teleAnim.t / 0.13 * 0.75;
-  else a = Math.max(0, 0.75 * (1 - (teleAnim.t - 0.13) / 0.26));
-  if (teleAnim.t > 0.40) teleAnim = null;
+  if (teleAnim.t < 0.13) a = teleAnim.t/0.13*0.8;
+  else a = Math.max(0, 0.8*(1 - (teleAnim.t - 0.13)/0.30));
+  if (teleAnim.t > 0.44) teleAnim = null;
   return a;
 }
 
-/* ---------------- desktop controls ---------------- */
-
-const cam3 = { pos: [0, 1.65, 2.4], yaw: 0, pitch: -0.05 };
+/* desktop */
 const keys = new Set();
+
+function walk(dt) {
+  const spd = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? 3.4 : 1.8;
+  let f = 0, s = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) f += 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) f -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) s += 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) s -= 1;
+  if (!f && !s) return 0;
+  const n = Math.hypot(f, s);
+  const fx = Math.sin(cam3.yaw), fz = -Math.cos(cam3.yaw);
+  const rx = Math.cos(cam3.yaw), rz = Math.sin(cam3.yaw);
+  const dx = (fx*f + rx*s)/n, dz = (fz*f + rz*s)/n;
+  tryMove(player[0] + dx*spd*dt, player[2] + dz*spd*dt);
+  return Math.min(1, n);
+}
+/* ---------------- WebXR ---------------- */
+
+let xrSession = null, xrRefSpace = null, xrRaf = 0, deskRaf = 0;
+let hf0 = null, floorY = 0;
+let aimSrc = null, aimHit = null, aimActive = false;
+const beams = [];
+let smoothMove = 0;
+
+async function enterVR() {
+  if (!navigator.xr) return;
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+    });
+    xrSession = session;
+    await gl.makeXRCompatible();
+    const layer = new XRWebGLLayer(session, gl, { antialias: true, alpha: false, depth: true });
+    session.updateRenderState({ baseLayer: layer });
+    if ('fixedFoveation' in layer) { try { layer.fixedFoveation = 0.75; } catch (e) {} }
+    try {
+      xrRefSpace = await session.requestReferenceSpace('local-floor');
+      floorY = 0;
+    } catch (e) {
+      xrRefSpace = await session.requestReferenceSpace('local');
+      floorY = -1.6;
+    }
+    session.addEventListener('selectstart', e => { aimSrc = e.inputSource; aimActive = true; });
+    session.addEventListener('selectend', e => {
+      if (e.inputSource !== aimSrc) return;
+      aimActive = false;
+      if (aimHit) teleport(aimHit);
+      aimHit = null;
+    });
+    session.addEventListener('selectcancel', e => {
+      if (e.inputSource === aimSrc) { aimActive = false; aimHit = null; }
+    });
+    session.addEventListener('end', () => {
+      xrSession = null; xrRefSpace = null; hf0 = null;
+      aimSrc = null; aimHit = null; aimActive = false;
+      beams.length = 0; smoothMove = 0; turn = 0;
+      document.body.classList.remove('inxr');
+      vrBtn.textContent = 'Войти в VR';
+      vrBtn.onclick = () => enterVR();
+      note('VR-сессия завершена.');
+      lastT = performance.now();
+      deskRaf = requestAnimationFrame(desktopFrame);
+    });
+    document.body.classList.add('inxr');
+    hf0 = null;
+    vrBtn.textContent = 'Выйти из VR';
+    vrBtn.onclick = () => xrSession && xrSession.end();
+    note('VR активен.');
+    xrSession.requestAnimationFrame(xrFrame);
+  } catch (e) {
+    note('Не удалось войти в VR: ' + e.message + ' — для WebXR нужен https или localhost, а в приватном окне VR недоступен.');
+  }
+}
+
+function readInput(dt, fwdScene) {
+  smoothMove = 0;
+  for (const src of xrSession.inputSources) {
+    const gp = src.gamepad;
+    if (!gp || !gp.axes) continue;
+    const ax = gp.axes;
+    const usePair = ax.length >= 4 ? 2 : 0;
+    let sx = ax[usePair] || 0, sy = ax[usePair + 1] || 0;
+    const m = Math.hypot(sx, sy);
+    if (m > 0.18) {
+      const k = (m - 0.18)/0.82/m;
+      sx *= k; sy *= k;
+      const spd = 2.3;
+      const fx = fwdScene[0], fz = fwdScene[2];
+      const fl = Math.hypot(fx, fz) || 1;
+      const hx = fx/fl, hz = fz/fl;
+      const rx = -hz, rz = hx;
+      const vx = (hx*-sy + rx*sx)*spd, vz = (hz*-sy + rz*sx)*spd;
+      tryMove(player[0] + vx*dt, player[2] + vz*dt);
+      smoothMove = Math.min(1, m);
+    } else if (ax.length >= 4) {
+      const tx = ax[0] || 0, ty = ax[1] || 0;
+      if (Math.hypot(tx, ty) > 0.6) turn -= tx*dt*1.7;
+    }
+  }
+}
+
+function xrFrame(t, frame) {
+  xrSession.requestAnimationFrame(xrFrame);
+  const dt = Math.min((t - lastT)/1000, 0.1);
+  lastT = t;
+  clock += dt;
+  frameTris = 0;
+  frameInst = 0;
+  const fade = updateTele(dt);
+
+  const layer = xrSession.renderState.baseLayer;
+  const pose = frame.getViewerPose(xrRefSpace);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  gl.clearColor(0.80, 0.86, 0.93, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!pose) return;
+
+  const hp = pose.transform.position;
+  if (!hf0) hf0 = [hp.x, floorY, hp.z];
+
+  const hm = pose.transform.matrix;
+  const Minv = locoInv(player, hf0, turn);
+  const fwdScene = xformD(Minv, [-hm[8], -hm[9], -hm[10]]);
+  readInput(dt, fwdScene);
+
+  beams.length = 0;
+  aimHit = null;
+  for (const src of xrSession.inputSources) {
+    if (!src.targetRaySpace) continue;
+    const cp = frame.getPose(src.targetRaySpace, xrRefSpace);
+    if (!cp) continue;
+    const m = cp.transform.matrix;
+    const o = xformP(Minv, [m[12], m[13], m[14]]);
+    const d = xformD(Minv, [-m[8], -m[9], -m[10]]);
+    let len = 1.3, hit = null;
+    if (src === aimSrc && aimActive) {
+      hit = floorHit(o, d);
+      if (hit) {
+        aimHit = hit;
+        len = Math.hypot(hit[0]-o[0], hit[1]-o[1], hit[2]-o[2]);
+      }
+    }
+    beams.push({ o, d, len, aim: !!hit });
+  }
+
+  const M = locoMat(player, hf0, turn);
+  const st = { aimHit, beams, fade, vig: smoothMove*0.30 };
+  for (const view of pose.views) {
+    const vp = layer.getViewport(view);
+    const vpos = view.transform.position;
+    drawView(view.projectionMatrix, mul4(view.transform.inverse.matrix, M),
+      xformP(Minv, [vpos.x, vpos.y, vpos.z]), fwdScene,
+      { x: vp.x, y: vp.y, w: vp.width, h: vp.height }, st);
+  }
+}
+/* ---------------- desktop controls, frame loop, boot ---------------- */
+
 let dragging = false, lastX = 0, lastY = 0;
 
 canvas.addEventListener('pointerdown', e => {
@@ -490,8 +1291,8 @@ canvas.addEventListener('pointerdown', e => {
 });
 canvas.addEventListener('pointermove', e => {
   if (!dragging) return;
-  cam3.yaw -= (e.clientX - lastX) * 0.005;
-  cam3.pitch = clamp(cam3.pitch - (e.clientY - lastY) * 0.005, -1.4, 1.4);
+  cam3.yaw -= (e.clientX - lastX)*0.005;
+  cam3.pitch = clamp(cam3.pitch - (e.clientY - lastY)*0.005, -1.4, 1.4);
   lastX = e.clientX; lastY = e.clientY;
 });
 const endDrag = () => { dragging = false; };
@@ -503,249 +1304,66 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => keys.delete(e.code));
 
-function walk(dt) {
-  const spd = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? 3.2 : 1.7;
-  let f = 0, s = 0;
-  if (keys.has('KeyW') || keys.has('ArrowUp')) f += 1;
-  if (keys.has('KeyS') || keys.has('ArrowDown')) f -= 1;
-  if (keys.has('KeyD') || keys.has('ArrowRight')) s += 1;
-  if (keys.has('KeyA') || keys.has('ArrowLeft')) s -= 1;
-  if (!f && !s) return;
-  const fx = Math.sin(cam3.yaw), fz = -Math.cos(cam3.yaw);
-  const rx = Math.cos(cam3.yaw), rz = Math.sin(cam3.yaw);
-  const nx = player[0] + (fx*f + rx*s) * spd * dt;
-  const nz = player[2] + (fz*f + rz*s) * spd * dt;
-  player[0] = clamp(nx, RM.x0 + MARGIN - cam3.pos[0], RM.x1 - MARGIN - cam3.pos[0]);
-  player[2] = clamp(nz, RM.z0 + MARGIN - cam3.pos[2], RM.z1 - MARGIN - cam3.pos[2]);
-}
-
-/* ---------------- WebXR ---------------- */
-
-let xrSession = null, xrRefSpace = null, rafId = 0, centered = false;
-let aimSrc = null, aimHit = null, aimActive = false;
-const poses = new Map();
-
-async function enterVR() {
-  if (!navigator.xr) return;
-  try {
-    const session = await navigator.xr.requestSession('immersive-vr', {
-      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
-    });
-    xrSession = session;
-    await gl.makeXRCompatible();
-    session.updateRenderState({
-      baseLayer: new XRWebGLLayer(session, gl, { antialias: true, alpha: false, depth: true })
-    });
-    try { xrRefSpace = await session.requestReferenceSpace('local-floor'); }
-    catch (e1) {
-      try { xrRefSpace = await session.requestReferenceSpace('bounded-floor'); }
-      catch (e2) { xrRefSpace = await session.requestReferenceSpace('local'); }
-    }
-    session.addEventListener('selectstart', e => { aimSrc = e.inputSource; aimActive = true; });
-    session.addEventListener('selectend', e => {
-      if (e.inputSource === aimSrc) {
-        aimActive = false;
-        if (aimHit) teleport(aimHit);
-      }
-    });
-    session.addEventListener('selectcancel', e => { if (e.inputSource === aimSrc) aimActive = false; });
-    session.addEventListener('end', () => {
-      xrSession = null; xrRefSpace = null; aimSrc = null; aimHit = null; aimActive = false;
-      centered = false; poses.clear();
-      document.body.classList.remove('inxr');
-      vrBtn.textContent = 'Войти в VR';
-      note('VR-сессия завершена.');
-      lastT = performance.now();
-      rafId = requestAnimationFrame(desktopFrame);
-    });
-    document.body.classList.add('inxr');
-    centered = false;
-    vrBtn.textContent = 'Выйти из VR';
-    vrBtn.onclick = () => xrSession && xrSession.end();
-    session.requestAnimationFrame(xrFrame);
-  } catch (e) {
-    note('Не удалось войти в VR: ' + e.message + ' — для WebXR нужен https или localhost.');
-  }
-}
-
-function updateInput(frame) {
-  poses.clear();
-  aimHit = null;
-  for (const src of xrSession.inputSources) {
-    if (!src.targetRaySpace) continue;
-    const pose = frame.getPose(src.targetRaySpace, xrRefSpace);
-    if (!pose) continue;
-    poses.set(src, pose.transform.matrix);
-    const m = pose.transform.matrix;
-    const o = [m[12] + player[0], m[13] + player[1], m[14] + player[2]];
-    const d = norm([-m[8], -m[9], -m[10]]);
-    if (src === aimSrc && aimActive) {
-      const hit = floorHit(o, d);
-      if (hit) aimHit = hit;
-    }
-  }
-}
-
-let lastT = performance.now();
-
-function xrFrame(t, frame) {
-  xrSession.requestAnimationFrame(xrFrame);
-  const dt = Math.min((t - lastT) / 1000, 0.1); lastT = t;
-  const fade = updateTele(dt);
-
-  const layer = xrSession.renderState.baseLayer;
-  const pose = frame.getViewerPose(xrRefSpace);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-  gl.clearColor(0.9, 0.92, 0.95, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  if (!pose) return;
-
-  if (!centered) {
-    player[0] = -pose.transform.position.x;
-    player[2] = -pose.transform.position.z;
-    player[1] = 0;
-    centered = true;
-  }
-  updateInput(frame);
-
-  for (const view of pose.views) {
-    const vp = layer.getViewport(view);
-    const viewMat = offsetView(view.transform.inverse.matrix, player);
-    drawView(view.projectionMatrix, viewMat, vp.x, vp.y, vp.width, vp.height, fade);
-  }
-}
-
-/* ---------------- drawing ---------------- */
-
-function setRoomGlobals(proj, viewMat, fade) {
-  const u = room.u;
-  const cam = camFromView(viewMat);
-  gl.uniformMatrix4fv(u.uProj, false, proj);
-  gl.uniformMatrix4fv(u.uView, false, viewMat);
-  gl.uniformMatrix4fv(u.uModel, false, IDENT);
-  gl.uniform3fv(u.uCam, cam);
-  gl.uniform3fv(u.uFwd, fwdFromView(viewMat));
-  gl.uniform3fv(u.uSun, SUN);
-  gl.uniform3fv(u.uRoomMin, [RM.x0, RM.y0, RM.z0]);
-  gl.uniform3fv(u.uRoomMax, [RM.x1, RM.y1, RM.z1]);
-  gl.uniform4fv(u.uPool, POOLS);
-  gl.uniform1f(u.uVig, 0.10 + fade * 0.45);
-  gl.uniform1f(u.uDyn, 0);
-  gl.uniform1f(u.uAOScale, 1);
-}
-
-function drawView(proj, viewMat, x, y, w, h, fade) {
-  gl.viewport(x, y, w, h);
-  gl.enable(gl.DEPTH_TEST);
-  gl.depthMask(true);
-  gl.clear(gl.DEPTH_BUFFER_BIT);
-
-  gl.useProgram(room.p);
-  setRoomGlobals(proj, viewMat, fade);
-
-  gl.disable(gl.DEPTH_TEST);
-  gl.depthMask(false);
-  gl.bindVertexArray(skyMesh.vao);
-  gl.drawArrays(gl.TRIANGLES, 0, skyMesh.count);
-  gl.enable(gl.DEPTH_TEST);
-  gl.depthMask(true);
-
-  gl.bindVertexArray(roomMesh.vao);
-  gl.drawArrays(gl.TRIANGLES, 0, roomMesh.count);
-
-  const u = room.u;
-  gl.uniform1f(u.uDyn, 1);
-  gl.uniform3fv(u.uDynAlbedo, [0.30, 0.315, 0.34]);
-  gl.uniform1f(u.uAOScale, 0.35);
-  const model = new Float32Array(16);
-  for (const m of poses.values()) {
-    model.set(m);
-    model[12] += player[0]; model[13] += player[1]; model[14] += player[2];
-    gl.uniformMatrix4fv(u.uModel, false, model);
-    gl.bindVertexArray(ctrlMesh.vao);
-    gl.drawArrays(gl.TRIANGLES, 0, ctrlMesh.count);
-  }
-  gl.uniformMatrix4fv(u.uModel, false, IDENT);
-
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-  gl.depthMask(false);
-
-  if (aimActive && aimHit) {
-    gl.useProgram(marker.p);
-    gl.uniformMatrix4fv(marker.u.uProj, false, proj);
-    gl.uniformMatrix4fv(marker.u.uView, false, viewMat);
-    gl.uniform3fv(marker.u.uCenter, aimHit);
-    gl.uniform1f(marker.u.uSize, 0.7);
-    gl.bindVertexArray(markerMesh.vao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, markerMesh.count);
-  }
-
-  gl.useProgram(beam.p);
-  gl.uniformMatrix4fv(beam.u.uProj, false, proj);
-  gl.uniformMatrix4fv(beam.u.uView, false, viewMat);
-  gl.uniform3fv(beam.u.uCam, camFromView(viewMat));
-  gl.uniform4f(beam.u.uCol, 0.20, 0.34, 0.62, 0.55);
-  gl.bindVertexArray(beamMesh.vao);
-  for (const m of poses.values()) {
-    const o = [m[12] + player[0], m[13] + player[1], m[14] + player[2]];
-    const d = norm([-m[8], -m[9], -m[10]]);
-    let len = 0.55;
-    if (aimActive && aimHit) {
-      len = Math.hypot(aimHit[0]-o[0], aimHit[1]-o[1], aimHit[2]-o[2]);
-    }
-    gl.uniform3fv(beam.u.uO, o);
-    gl.uniform3fv(beam.u.uD, d);
-    gl.uniform1f(beam.u.uLen, len);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, beamMesh.count);
-  }
-
-  if (fade > 0.001) {
-    gl.useProgram(full.p);
-    gl.uniform4f(full.u.uCol, 0, 0, 0, fade);
-    gl.bindVertexArray(fullMesh.vao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, fullMesh.count);
-  }
-
-  gl.depthMask(true);
-  gl.disable(gl.BLEND);
-  gl.bindVertexArray(null);
-}
-
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-  const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  const w = Math.max(1, Math.floor(canvas.clientWidth*dpr));
+  const h = Math.max(1, Math.floor(canvas.clientHeight*dpr));
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
 }
 
+let perfAcc = 0, perfFrames = 0;
+
 function desktopFrame(t) {
   if (xrSession) return;
-  rafId = requestAnimationFrame(desktopFrame);
-  const dt = Math.min((t - lastT) / 1000, 0.1); lastT = t;
+  deskRaf = requestAnimationFrame(desktopFrame);
+  const dt = Math.min((t - lastT)/1000, 0.1);
+  lastT = t;
+  clock += dt;
+  frameTris = 0;
+  frameInst = 0;
   const fade = updateTele(dt);
   walk(dt);
   resize();
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.clearColor(0.9, 0.92, 0.95, 1);
+  gl.clearColor(0.80, 0.86, 0.93, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  const proj = perspective(1.05, canvas.width / canvas.height, 0.03, 200);
-  const viewMat = offsetView(lookView(cam3.pos, cam3.yaw, cam3.pitch), player);
-  drawView(proj, viewMat, 0, 0, canvas.width, canvas.height, fade);
-  const glErr = gl.getError();
-  if (glErr) fail('WebGL ошибка 0x' + glErr.toString(16));
+  const proj = perspective(1.15, canvas.width/canvas.height, 0.05, 400);
+  const M = locoMat(player, ZERO3, 0);
+  const fwd = [Math.sin(cam3.yaw), 0, -Math.cos(cam3.yaw)];
+  drawView(proj, mul4(lookView(EYE, cam3.yaw, cam3.pitch), M),
+    [player[0] + EYE[0], player[1] + EYE[1], player[2] + EYE[2]], fwd,
+    { x: 0, y: 0, w: canvas.width, h: canvas.height },
+    { aimHit: null, beams: [], fade, vig: 0 });
+  const err = gl.getError();
+  if (err) fail('WebGL ошибка 0x' + err.toString(16));
+
+  perfAcc += dt;
+  perfFrames++;
+  if (perfAcc >= 0.5) {
+    perfEl.textContent = (perfFrames/perfAcc).toFixed(0) + ' fps · инстансов ' + frameInst +
+      ' · треугольников ' + (frameTris/1000).toFixed(0) + 'k';
+    perfAcc = 0;
+    perfFrames = 0;
+  }
 }
 
 /* ---------------- boot ---------------- */
 
-gl.enable(gl.DEPTH_TEST);
+const counts = {};
+for (const k of KINDS) counts[k.key] = k.list.length;
+const mushTotal = mushKinds.reduce((a, k) => a + k.list.length, 0);
+
+if (!fatal) {
+  note('Лес сгенерирован: сосны ' + counts.pine + ', берёзы ' + counts.birch + ', дубы ' + counts.oak +
+    ', кусты ' + counts.bush + ', грибы ' + mushTotal + ', трава ' + counts.grass + '.');
+}
 
 if (navigator.xr && navigator.xr.isSessionSupported) {
   navigator.xr.isSessionSupported('immersive-vr').then(ok => {
     if (ok) {
       vrBtn.disabled = false;
       vrBtn.onclick = () => (xrSession ? xrSession.end() : enterVR());
-      note('WebXR найден. Нажми «Войти в VR». Если шлем не виден — нужен https или localhost.');
+      note('WebXR найден. Нажми «Войти в VR». Если шлема нет в списке — проверь, что рантайм VR запущен.');
     } else {
       vrBtn.disabled = true;
       note('WebXR VR-устройство не найдено. Работает режим обзора: мышь + WASD.');
@@ -755,18 +1373,59 @@ if (navigator.xr && navigator.xr.isSessionSupported) {
   note('WebXR в этом браузере нет. Работает режим обзора: мышь + WASD.');
 }
 
+for (const p of [['yaw', v => cam3.yaw = v], ['pitch', v => cam3.pitch = clamp(v, -1.4, 1.4)]]) {
+  const v = parseFloat(QS.get(p[0]));
+  if (Number.isFinite(v)) p[1](v);
+}
+const px = parseFloat(QS.get('x')), pz = parseFloat(QS.get('z'));
+if (Number.isFinite(px) && Number.isFinite(pz)) { player[0] = px; player[2] = pz; }
+
 window.addEventListener('resize', resize);
 resize();
-
-// Стартовый вид можно задать адресом: index.html?yaw=1.2&pitch=-0.1
-const qs = new URLSearchParams(location.search);
-for (const k of ['yaw', 'pitch']) {
-  const v = parseFloat(qs.get(k));
-  if (Number.isFinite(v)) cam3[k] = clamp(v, -Math.PI*2, Math.PI*2);
-}
-
 lastT = performance.now();
-rafId = requestAnimationFrame(desktopFrame);
+deskRaf = requestAnimationFrame(desktopFrame);
+/* ---------------- selftest (?selftest=1) ----------------
+   Инварианты перемещения: не проваливаться в стволы, не выходить за границу,
+   телепорт только на свободные точки. */
+
+if (QS.get('selftest')) {
+  let bad = 0, rays = 0, raysHit = 0;
+  player[0] = 0; player[1] = 0; player[2] = 7;
+  for (let i = 0; i < 4000; i++) {
+    const a = i*0.37;
+    tryMove(player[0] + Math.cos(a)*0.9, player[2] + Math.sin(a)*0.9);
+    if (Math.hypot(player[0], player[2]) > FENCE_R + 0.01) bad++;
+    if (pointBlocked(player[0], player[2])) bad++;
+  }
+  for (let i = 0; i < 400; i++) {
+    const a = i*0.0418;
+    const o = [player[0] + Math.cos(a)*0.5, 1.3, player[2] + Math.sin(a)*0.5];
+    const d = norm([Math.cos(a)*0.30, -0.95, Math.sin(a)*0.30]);
+    rays++;
+    const h = floorHit(o, d);
+    if (!h) continue;
+    raysHit++;
+    if (pointBlocked(h[0], h[2])) bad++;
+    if (Math.hypot(h[0], h[2]) > FENCE_R) bad++;
+    teleport(h);
+    for (let k = 0; k < 40; k++) updateTele(0.02);
+    if (Math.abs(player[0] - h[0]) > 0.01 || Math.abs(player[2] - h[2]) > 0.01) bad++;
+  }
+  const proj = perspective(1.15, 1.6, 0.05, 400);
+  drawView(proj, mul4(lookView(EYE, 0, 0), locoMat(player, ZERO3, 0)),
+    [player[0], EYE[1], player[2]], [0, 0, -1],
+    { x: 0, y: 0, w: Math.max(1, canvas.width), h: Math.max(1, canvas.height) },
+    { aimHit: null, beams: [], fade: 0, vig: 0 });
+  const glErr = gl.getError();
+  if (glErr) bad++;
+
+  let drawn = 0;
+  for (const kd of drawKinds) drawn += kd.visible;
+  perfEl.textContent = 'SELFTEST ' + (bad || fatal ? 'FAIL bad=' + bad : 'OK') +
+    ' rays=' + raysHit + '/' + rays + ' kinds=' + drawKinds.length + ' drawn=' + drawn +
+    ' tris=' + Math.round(frameTris/1000) + 'k glErr=' + glErr +
+    ' trees=' + (counts.pine + counts.birch + counts.oak) + ' mush=' + mushTotal;
+}
 </script>
 </body>
 </html>

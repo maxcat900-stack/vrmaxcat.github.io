@@ -1,0 +1,5 @@
+.qwen/
+node_modules/
+*.log
+Thumbs.db
+Desktop.ini

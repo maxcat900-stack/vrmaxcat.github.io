@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Густой лес · WebXR</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #b9c6d4;
+    font-family: system-ui, "Segoe UI", Roboto, sans-serif; color: #16202a; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #hud { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    max-width: min(94vw, 720px); padding: 12px 14px; border-radius: 14px;
+    background: rgba(255,255,255,.86); border: 1px solid rgba(0,0,0,.10);
+    box-shadow: 0 8px 30px rgba(20,30,50,.16); backdrop-filter: blur(8px); }
+  body.inxr #hud { display: none; }
+  #hud h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  #status { margin: 0 0 9px; font-size: 13px; line-height: 1.45; color: #2c3641; }
+  .keys { margin: 8px 0 0; font-size: 12px; color: #4d5865; line-height: 1.45; }
+  .perf { margin: 6px 0 0; font-size: 11px; color: #6b7480; font-variant-numeric: tabular-nums; }
+  button { font: inherit; font-size: 14px; padding: 9px 16px; border-radius: 10px;
+    border: 1px solid #1864ab; background: #1864ab; color: #fff; cursor: pointer; }
+  button[disabled] { background: #c3ccd6; border-color: #c3ccd6; color: #64707d; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>Густой лес · сосны, берёзы, дубы, грибы</h1>
+  <p id="status">Загрузка…</p>
+  <button id="vr" disabled>Войти в VR</button>
+  <p class="keys">Мышь — осмотр &nbsp;·&nbsp; W A S D / стрелки — идти &nbsp;·&nbsp; Shift — быстрее<br>
+  В шлеме: стик — ходьба &nbsp;·&nbsp; наведись контроллером на землю и отпусти trigger — телепорт &nbsp;·&nbsp; тачпад — поворот</p>
+  <p class="perf" id="perf"></p>
+</div>
+<script>
