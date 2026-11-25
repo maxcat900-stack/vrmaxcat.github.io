@@ -24,7 +24,7 @@ function ftri(g, a, b, c, col, sw, tr) {
 
 function fquad(g, a, b, c, d, col, sw, tr) { ftri(g, a, b, c, col, sw, tr); ftri(g, a, c, d, col, sw, tr); }
 
-function tube(g, p0, p1, r0, r1, seg, col, sw, tr) {
+function tube(g, p0, p1, r0, r1, seg, col, sw, tr, caps) {
   const ax = norm([p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]]);
   const u = norm(cross(Math.abs(ax[1]) < 0.9 ? [0,1,0] : [1,0,0], ax));
   const v = cross(ax, u);
@@ -38,17 +38,41 @@ function tube(g, p0, p1, r0, r1, seg, col, sw, tr) {
     const a0 = TAU*j/seg, a1 = TAU*(j+1)/seg;
     fquad(g, ring(0,r0,a0), ring(1,r1,a0), ring(1,r1,a1), ring(0,r0,a1), col, sw, tr);
   }
+  // End caps: without them every tube is a hollow pipe and the opening reads as a
+  // black hole (trunk tops, branch tips).
+  if (caps) {
+    const cap = (t, r, nrm) => {
+      for (let j = 0; j < seg; j++) {
+        pv(g, ring(t, r, TAU*j/seg), nrm, col, sw, tr);
+        pv(g, ring(t, r, TAU*(j+1)/seg), nrm, col, sw, tr);
+        pv(g, [p0[0]+(p1[0]-p0[0])*t, p0[1]+(p1[1]-p0[1])*t, p0[2]+(p1[2]-p0[2])*t], nrm, col, sw, tr);
+      }
+    };
+    if (caps & 1) cap(0, r0, [-ax[0], -ax[1], -ax[2]]);
+    if (caps & 2) cap(1, r1, ax);
+  }
 }
 
 function coneUp(g, c, r, h, seg, col, sw, tr) {
   const apex = [c[0], c[1]+h, c[2]];
   const rp = j => { const a = TAU*j/seg; return [c[0]+r*Math.cos(a), c[1], c[2]+r*Math.sin(a)]; };
   for (let j = 0; j < seg; j++) ftri(g, rp(j), rp(j+1), apex, col, sw, tr);
+  const under = [col[0]*0.62, col[1]*0.62, col[2]*0.62], dn = [0, -1, 0];
+  for (let j = 0; j < seg; j++) {
+    pv(g, c, dn, under, sw, tr);
+    pv(g, rp(j+1), dn, under, sw, tr);
+    pv(g, rp(j), dn, under, sw, tr);
+  }
 }
 
 function blob(g, c, r, sy, jit, seg, rings, col, sw, tr, rnd) {
   const R = [];
-  for (let i = 0; i <= rings; i++) for (let j = 0; j <= seg; j++) R.push(1 + (rnd()-0.5)*jit);
+  for (let i = 0; i <= rings; i++) {
+    const row = [];
+    for (let j = 0; j < seg; j++) row.push(1 + (rnd()-0.5)*jit);
+    row.push(row[0]);
+    for (const q of row) R.push(q);
+  }
   const P = (i, j) => {
     const t = Math.PI*i/rings, p = TAU*j/seg, q = R[i*(seg+1)+j]*r;
     return [c[0] + q*Math.sin(t)*Math.cos(p), c[1] + q*Math.cos(t)*sy, c[2] + q*Math.sin(t)*Math.sin(p)];

@@ -1,6 +1,6 @@
 /* ---------------- rendering ---------------- */
 
-const FOG_DENS = 0.030, WIND = 0.05;
+const FOG_DENS = 0.026, WIND = 0.05;
 const ZERO3 = new Float32Array([0, 0, 0]);
 let clock = 0, frameTris = 0, frameInst = 0;
 
@@ -37,9 +37,13 @@ function drawView(proj, viewMat, cam, fwd, vp, st) {
 
   gl.disable(gl.DEPTH_TEST);
   gl.depthMask(false);
+  // far plane of this view: m14/(m10+1). The dome must sit inside it or it is clipped.
+  const far = Math.abs(proj[14]/(proj[10] + 1));
+  const skyR = clamp(far > 1e-4 && Number.isFinite(far) ? far*0.85 : SKY_R, 30, SKY_R);
   gl.useProgram(pSky.p);
   um4v(pSky.u, 'uProj', proj); um4v(pSky.u, 'uView', viewMat);
   u3fv(pSky.u, 'uCam', cam); u3fv(pSky.u, 'uCenter', cam);
+  u1f(pSky.u, 'uSkyR', skyR);
   u1f(pSky.u, 'uFogDens', FOG_DENS); u1f(pSky.u, 'uTime', clock);
   gl.bindVertexArray(skyMesh.vao);
   gl.drawArrays(gl.TRIANGLES, 0, skyMesh.count);

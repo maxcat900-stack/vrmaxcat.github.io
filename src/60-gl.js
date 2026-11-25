@@ -48,13 +48,13 @@ function triStrip(data, comps) {
 
 const pWorld = program(VS_WORLD, FS_WORLD);
 const pGround = program(VS_SIMPLE, FS_GROUND);
-const pSky = program(VS_SIMPLE, FS_SKY);
+const pSky = program(VS_SKY, FS_SKY);
 const pShadow = program(VS_SHADOW, FS_SHADOW);
 const pMarker = program(VS_MARKER, FS_MARKER);
 const pBeam = program(VS_BEAM, FS_BEAM);
 const pFull = program(VS_FULL, FS_FULL);
 
-const GROUND_HALF = 170, SKY_R = 85;
+const GROUND_HALF = 300, SKY_R = 460;
 const groundMesh = (() => {
   const g = [];
   const H = GROUND_HALF;
@@ -71,7 +71,7 @@ const groundMesh = (() => {
 
 const skyMesh = (() => {
   const g = [];
-  domeGeo(g, SKY_R, 22, 12);
+  domeGeo(g, 1, 22, 12);
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
   makeBuf(g, gl.STATIC_DRAW);

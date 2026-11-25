@@ -104,6 +104,19 @@ void main(){
   gl_Position = uProj*uView*vec4(vW, 1.0);
 }`;
 
+// The XR runtime picks the far plane, so the dome radius comes from a uniform:
+// a dome baked at a fixed large radius gets clipped and the sky disappears.
+const VS_SKY = `#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uProj, uView;
+uniform vec3 uCenter;
+uniform float uSkyR;
+out vec3 vW;
+void main(){
+  vW = aPos*uSkyR + uCenter;
+  gl_Position = uProj*uView*vec4(vW, 1.0);
+}`;
+
 const FS_GROUND = `#version 300 es
 precision highp float;
 in vec3 vW;
